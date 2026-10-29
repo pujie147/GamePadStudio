@@ -24,7 +24,7 @@ from .studio_core import ConfigStore, GestureEngine, BUTTONS, ACTION_NAMES
 from .device import Device
 from .actions import create_actions, input_permission_status, request_input_permission, parse_keys, launch_command
 from .mapping_engine import MappingRuntime, effective_mappings, binding_label
-from .mapping_ui import BindingDialog
+from .mapping_ui import BindingDialog, TriggerLog
 from .battery_monitor import BatteryMonitor, battery_reported, normalize_power
 from .emergency_hotkey import EmergencyHotkey, emergency_hotkey_supported, normalize_hotkey_settings
 from .screenshot_hotkey import ScreenshotHotkey, normalize_screenshot_hotkey_settings
@@ -657,6 +657,8 @@ class Studio(GlassWindow):
         feedback = QHBoxLayout()
         feedback.addWidget(self.mapping_feedback, 1)
         layout.addLayout(feedback)
+        self.trigger_log = TriggerLog()
+        layout.addWidget(self.trigger_log)
         self.stack.addWidget(scroll(page))
 
     def eventFilter(self, watched, event):
@@ -2256,6 +2258,14 @@ class Studio(GlassWindow):
             else:
                 self.engine.reset()
                 self.last_touch=None
+            if hasattr(self, 'trigger_log'):
+                live = bool(self.enabled) and not self.learn
+                self.trigger_log.record(
+                    events, feedback.get('sequence', 0), bool(feedback.get('preview')),
+                    (state or {}).get('family', 'generic'),
+                    new if live else (),
+                    effective_mappings(self.config, state) if new else {},
+                    feedback.get('macro_events', []), feedback.get('macro_sequence', 0))
             if new:
                 self.notify(tr('按下 ') + ' / '.join(self.button_names.get(k,str(k)) for k in sorted(new)))
         except Exception as exc:

@@ -32,6 +32,69 @@ ACTIONS = {'none', 'suppress', 'hold', 'shortcut', 'mouse_hold', 'mouse_click', 
            'gamepad_button', 'gamepad_chord', 'gamepad_turbo', 'gamepad_macro',
            'antigravity'}
 
+# Mirrors the runner defaults below, so a validated binding always executes
+# exactly as it was stored.
+MACRO_STEP_LIMIT = 64
+MACRO_HOLD_LIMITS = (10, 500)
+MACRO_GAP_LIMITS = (0, 5000)
+MACRO_HOLD_DEFAULT = 50
+MACRO_GAP_DEFAULT = 30
+
+
+def macro_loops(binding):
+    """A looping macro is held by its trigger, so its key-up must stop the runner."""
+    return binding.get('action') == 'gamepad_macro' and bool(binding.get('loop'))
+
+
+def _macro_flag(value, label):
+    if type(value) is not bool:
+        raise ValueError(f'手柄动作宏的「{label}」开关应为布尔值')
+    return value
+
+
+def _macro_ms(value, field, limits, fallback):
+    if value is None:
+        return fallback
+    low, high = limits
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f'手柄动作宏的「{field}」应为 {low} 至 {high} 毫秒')
+    number = int(round(value))
+    if not low <= number <= high:
+        raise ValueError(f'手柄动作宏的「{field}」应在 {low} 至 {high} 毫秒之间')
+    return number
+
+
+def _macro_step_buttons(step):
+    buttons = step.get('buttons')
+    if isinstance(buttons, (list, tuple)):
+        parts = [str(b).strip() for b in buttons if str(b).strip()]
+    else:
+        parts = [p.strip() for p in str(step.get('value', '')).split('+') if p.strip()]
+    parts = list(dict.fromkeys(parts))
+    if not parts or len(parts) > 4 or not set(parts) <= set(GAMEPAD_TARGETS):
+        raise ValueError('请选择支持的目标手柄按键')
+    return sorted(parts, key=GAMEPAD_TARGETS.index)
+
+
+def _macro_sequence(value):
+    """Normalize a recorded combo into self-describing steps the runner can replay."""
+    if not isinstance(value, (list, tuple)):
+        raise ValueError('请录制手柄动作宏流程')
+    if not value:
+        raise ValueError('宏流程为空：请录制至少一个按键步骤')
+    if len(value) > MACRO_STEP_LIMIT:
+        raise ValueError(f'手柄动作宏最多 {MACRO_STEP_LIMIT} 步')
+    steps = []
+    for step in value:
+        if not isinstance(step, dict):
+            raise ValueError('手柄动作宏步骤格式错误')
+        steps.append({'buttons': _macro_step_buttons(step),
+                      'hold_ms': _macro_ms(step.get('hold_ms'), '每步按住时长',
+                                            MACRO_HOLD_LIMITS, MACRO_HOLD_DEFAULT),
+                      'gap_ms': _macro_ms(step.get('gap_ms'), '延迟时长',
+                                          MACRO_GAP_LIMITS, MACRO_GAP_DEFAULT)})
+    return steps
+
 
 def canonical_trigger(value):
     parts = [ALIASES.get(p.strip().upper(), p.strip()) for p in str(value).split('+')]
@@ -70,6 +133,15 @@ def validate_binding(binding):
         raise ValueError('请设置目标手柄组合键')
     if action == 'gamepad_turbo' and not str(binding.get('value', '')).strip():
         raise ValueError('请选择手柄连发按键')
+    if action == 'gamepad_macro':
+        binding['sequence'] = _macro_sequence(binding.get('sequence'))
+        # Absent flags already read as False in the runner; do not materialize
+        # them, or every untouched profile would gain keys on save.
+        for field, label in (('interrupt', '可打断'), ('loop', '连续')):
+            if field in binding:
+                binding[field] = _macro_flag(binding[field], label)
+    elif 'interrupt' in binding or 'loop' in binding:
+        raise ValueError('可打断与连续仅用于手柄动作宏')
     if action in ('hold', 'shortcut') and not parse_keys(binding.get('value', '')):
         raise ValueError('请设置键盘按键或组合键')
     if action == 'hold' and binding.get('mode') == 'toggle' and any(
@@ -260,7 +332,11 @@ def binding_label(binding, family='generic'):
         hz = binding.get('rate_hz', 15)
         return '手柄连发 [' + trigger_label(value, family) + f' {hz}Hz]'
     if action == 'gamepad_macro':
-        return '手柄连招 (' + str(len(binding.get('sequence', []))) + ' 步)'
+        flags = ([tr('可打断')] if binding.get('interrupt') else [])
+        if binding.get('loop'):
+            flags.append(tr('循环'))
+        return ('手柄连招 (' + str(len(binding.get('sequence', []))) + ' 步)'
+                + ('·' + '·'.join(flags) if flags else ''))
     if action in ('hold', 'shortcut'):
         if action == 'shortcut':
             return value
@@ -459,7 +535,7 @@ class GestureEngine:
         mapping, fired = state['mapping'], state['fired']
         if fired:
             action = mapping.get(fired, {})
-            if action.get('action') in HOLD_ACTIONS:
+            if action.get('action') in HOLD_ACTIONS or macro_loops(action):
                 self._emit(key, fired, action, False)
         elif not cancel:
             action = mapping.get('short', {})
@@ -548,7 +624,10 @@ class GestureEngine:
             elif long.get('action') == 'suppress':
                 if age >= threshold:
                     state['fired'] = 'long'
-            elif (is_chord and not is_prefix) or short.get('action') in HOLD_ACTIONS:
+            elif ((is_chord and not is_prefix) or short.get('action') in HOLD_ACTIONS
+                  or short.get('action') == 'gamepad_macro'):
+                # A macro self-terminates, so it is deliberately absent from
+                # HOLD_ACTIONS: it must fire instantly without a synthetic release.
                 wait = (max(self.chord_window, 0.15) if is_prefix and short.get('action') == 'mouse_hold' else (self.chord_window if is_prefix else 0.))
                 if age >= wait:
                     self._emit(key, 'short', short, True)
@@ -590,6 +669,8 @@ class MappingRuntime:
         self.turbo_bindings = {}
         self.double_tap_bindings = {}
         self.macro_runners = []
+        self.macro_events = []
+        self.macro_seq = 0
         self.pulses = []
         self.recent = {}
         self.events = []
@@ -646,6 +727,53 @@ class MappingRuntime:
         result = capability(binding.get('value', '')) if callable(capability) else None
         return (result.get('reason') if isinstance(result, dict) else None) or '此平台不支持该键盘输出'
 
+    def _macro_note(self, runner, reason, held):
+        # A separate ring from `events`: mapping_deck reads the tail of `events`
+        # to decide which gesture card to light, so step noise cannot live there.
+        steps = runner['steps']
+        self.macro_seq += 1
+        self.macro_events.append({
+            'seq': self.macro_seq,
+            'trigger': runner['owner'][0], 'gesture': runner['owner'][1],
+            'reason': reason, 'steps': len(steps), 'reached': runner['index'] + 1,
+            'cycles': runner['cycles'], 'loop': bool(runner.get('loop')),
+            'elapsed': max(0.0, self.now - runner['started']), 'held': held or [],
+        })
+        self.macro_events = self.macro_events[-60:]
+
+    def _stop_runner(self, runner, reason):
+        held = None
+        if runner.get('is_down') and runner.get('active_binding'):
+            held = str(runner['active_binding'].get('value', '')).split('+')
+            self._hold(runner['active_binding'], False)
+            runner['is_down'] = False
+        self._macro_note(runner, reason, held)
+        if runner in self.macro_runners:
+            self.macro_runners.remove(runner)
+
+    def _interrupt_macros(self):
+        for runner in list(self.macro_runners):
+            if runner.get('interrupt'):
+                self._stop_runner(runner, 'interrupted')
+
+    def _stop_macro(self, owner):
+        for runner in list(self.macro_runners):
+            if runner.get('owner') == owner:
+                self._stop_runner(runner, 'released')
+
+    def _advance_macro(self, runner, wrap=False):
+        steps = runner['steps']
+        index = 0 if wrap else runner['index'] + 1
+        if wrap:
+            runner['cycles'] += 1
+        runner['index'] = index
+        runner['phase'] = 'hold'
+        step = steps[index]
+        runner['active_binding'] = step['binding']
+        self._hold(step['binding'], True)
+        runner['is_down'] = True
+        runner['next_time'] += step['hold_s']
+
     def _dispatch(self, binding, down=True):
         action = binding.get('action', 'none')
         # Old or imported Windows profiles can contain keys that the current
@@ -653,6 +781,10 @@ class MappingRuntime:
         # leave this one output inert; native posting failures still propagate.
         if self._unsupported_key_reason(binding):
             return
+        if down:
+            # Runs before anything is pressed so an interrupted macro releases
+            # its buttons rather than racing the new action for the same bit.
+            self._interrupt_macros()
         if action in ('hold', 'mouse_hold', 'gamepad_button', 'gamepad_chord') and binding.get('mode') == 'toggle':
             if down:
                 owner = (self.engine.current_trigger, self.engine.current_gesture)
@@ -725,8 +857,8 @@ class MappingRuntime:
                     val = str(st.get('value', '')).strip()
                 if not val:
                     continue
-                hold_s = max(0.01, float(st.get('hold_ms', 50)) / 1000.0)
-                gap_s = max(0.0, float(st.get('gap_ms', 30)) / 1000.0)
+                hold_s = max(0.01, float(st.get('hold_ms', MACRO_HOLD_DEFAULT)) / 1000.0)
+                gap_s = max(0.0, float(st.get('gap_ms', MACRO_GAP_DEFAULT)) / 1000.0)
                 sub = {'action': 'gamepad_chord' if '+' in val else 'gamepad_button', 'value': val}
                 norm_steps.append({'binding': sub, 'hold_s': hold_s, 'gap_s': gap_s})
             if norm_steps:
@@ -739,7 +871,14 @@ class MappingRuntime:
                     'next_time': self.now + first['hold_s'],
                     'active_binding': first['binding'],
                     'is_down': True,
+                    'owner': (self.engine.current_trigger, self.engine.current_gesture),
+                    'interrupt': bool(binding.get('interrupt')),
+                    'loop': bool(binding.get('loop')),
+                    'started': self.now,
+                    'cycles': 1,
                 })
+        elif action == 'gamepad_macro':
+            self._stop_macro((self.engine.current_trigger, self.engine.current_gesture))
         elif action in HOLD_ACTIONS:
             self._hold(binding, down)
         elif down and action in ('shortcut', 'mouse_click'):
@@ -762,7 +901,7 @@ class MappingRuntime:
                 self.recent[token] = self.now + .18
             self.events.append({'seq': self.seq, 'trigger': self.engine.current_trigger,
                                 'gesture': self.engine.current_gesture, 'action': binding_label(binding)})
-            self.events = self.events[-8:]
+            self.events = self.events[-60:]
 
     def update(self, state, config, enabled=True, now=None, preview=False):
         consume_error = getattr(self.mouse_thread, 'consume_output_error', None)
@@ -873,27 +1012,19 @@ class MappingRuntime:
                     if runner.get('is_down'):
                         self._hold(runner['active_binding'], False)
                         runner['is_down'] = False
-                    if idx + 1 >= len(steps):
-                        self.macro_runners.remove(runner)
+                    wrap = idx + 1 >= len(steps)
+                    if wrap and not runner.get('loop'):
+                        self._stop_runner(runner, 'complete')
                         break
                     if cur_step['gap_s'] > 0:
+                        # A looping macro spends its final gap between cycles.
                         runner['phase'] = 'gap'
                         runner['next_time'] += cur_step['gap_s']
+                        runner['wrap'] = wrap
                     else:
-                        runner['index'] = idx + 1
-                        nxt = steps[idx + 1]
-                        runner['active_binding'] = nxt['binding']
-                        self._hold(nxt['binding'], True)
-                        runner['is_down'] = True
-                        runner['next_time'] += nxt['hold_s']
+                        self._advance_macro(runner, wrap=wrap)
                 else:
-                    runner['index'] = idx + 1
-                    nxt = steps[idx + 1]
-                    runner['phase'] = 'hold'
-                    runner['active_binding'] = nxt['binding']
-                    self._hold(nxt['binding'], True)
-                    runner['is_down'] = True
-                    runner['next_time'] += nxt['hold_s']
+                    self._advance_macro(runner, wrap=bool(runner.pop('wrap', False)))
         self._update_virtual_xinput_state(state, regular_mappings)
         touch = self.touch_recognizer.update(state, self.now, config)
         self.touch_activity = {'contacts': touch['contacts'], 'mode': touch['mode']}
@@ -987,6 +1118,7 @@ class MappingRuntime:
                 'outputs': sorted(k for k, n in self.output_counts.items() if n),
                 'recent_outputs': sorted(k for k, until in self.recent.items() if until > self.now),
                 'events': list(self.events), 'sequence': self.seq, 'touch': dict(self.touch_activity),
+                'macro_events': list(self.macro_events), 'macro_sequence': self.macro_seq,
                 'unsupported_bindings': [dict(item) for item in self.unsupported_bindings]}
 
     def reset(self, blocked=None):

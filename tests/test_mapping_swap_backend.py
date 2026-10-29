@@ -23,7 +23,8 @@ def swap_store(tmp_path):
     store.data['profiles'][profile]['0'] = {
         'short': {'action': 'launch', 'executable': r'C:\Games\Nikki\InfinityNikki.exe',
                   'arguments': '--example'},
-        'long': {'action': 'gamepad_macro', 'sequence': [{'button': '1', 'duration': .1}]},
+        'long': {'action': 'gamepad_macro',
+                 'sequence': [{'buttons': ['1'], 'hold_ms': 100, 'gap_ms': 0}]},
         'long_press': .93,
     }
     store.data['profiles'][profile]['1'] = {

@@ -2,6 +2,24 @@
 
 All notable changes to **GamePad Studio** are documented in this file.
 
+## [Unreleased]
+
+### 🎮 Gamepad Action Macros (手柄动作宏)
+- **Action Macro Editor (`mapping_ui.py`)**: Exposed the previously engine-only `gamepad_macro` action in the gamepad target-action list as **手柄动作宏 (连招序列)**, built on the existing multi-button chord selector. Each grid click appends one ordered step in a row below the selection summary; key chips delete on click (red hover as the delete affordance) and `+ 延迟` inserts an editable per-step delay chip with its own delete. A global **每步按住** spin box writes `hold_ms` across every step, so the persisted `sequence` stays in exactly the shape the runner replays.
+- **Interrupt & Loop Semantics (`mapping_engine.py`)**: Added the `interrupt` (可打断) and `loop` (连续) binding flags. An interruptible macro releases its in-flight step *before* the incoming action claims a button, so two runners never race for the same XInput bit. `loop` restarts the sequence after the final step's `gap_ms` and stops on key-up; that release is routed through a dedicated `macro_loops()` predicate instead of adding `gamepad_macro` to `HOLD_ACTIONS`, which would have emitted a spurious release for one-shot macros and pushed the macro binding itself into `_hold`.
+- **Short-Press Macro Fix (`mapping_engine.py`)**: `gamepad_macro` on the short gesture previously never dispatched — the instant-fire branch admitted only completed chords and `HOLD_ACTIONS` members, so macros were reachable solely through the long-press threshold. They now fire on press.
+- **Macro Validation (`mapping_engine.py`)**: `validate_binding` now bounds and normalizes macro sequences (1–64 steps, targets restricted to `GAMEPAD_TARGETS`, `hold_ms` 10–500, `gap_ms` 0–5000, strict boolean flags) and rejects `interrupt`/`loop` on non-macro actions. Two legacy step shapes tolerated only by the card preview renderer (`{'button': …, 'duration': …}` and `{'action': 'down'|'up'|'delay'}`) were never executable by the runner and are now rejected; the affected test fixtures moved to the canonical form.
+
+### 📟 Trigger Observability
+- **Trigger Log (`mapping_ui.py` / `studio.py`)**: Added a collapsible (collapsed by default), 200-row-capped rolling record to the mapping workspace that distinguishes dispatched actions (`A 短按 → 手柄连招 (3 步)`), bare presses of unmapped buttons (`RB 按下 · 未映射`), chord prefixes (`LB 按下 · 组合前缀`) and suppressed keys (`· 已屏蔽`), with a `仅动作` filter that hides without discarding, and an amber `⚠` treatment while 安全试按 preview is active. Entries are deduplicated on the engine's monotonic `sequence`, which also detects an agent restart renumbering from zero.
+- **Macro Lifecycle Notes (`mapping_engine.py`)**: `MappingRuntime` now reports how each run ended on a dedicated `macro_events` channel — `宏完成 · 3 步 · 0.24s`, `宏循环 4 轮后松手停止 · 0.70s`, `宏被打断 · 停在第 1/3 步 · 已释放 LB` — carrying ending reason, step progress, cycle count and elapsed time. It is deliberately separate from `events`, whose tail the mapping deck reads to choose which gesture card to highlight.
+- **List & Card Labels (`mapping_engine.py`)**: `binding_label` marks macro flags inline (`手柄连招 (2 步)·可打断·循环`) so looping and interruptible combos are distinguishable in the mapping list at a glance.
+
+### 🧪 Tests
+- Added 29 cases (17 functions, one parametrized over 13 rejection shapes) to `tests/test_gamepad_macros.py`: short-press dispatch with an early key-up that must not truncate the combo, interrupt-before-new-action ordering, loop cycles with a single clean release, non-interruptible survival against an unrelated key, `output_counts` never left latched, macro validation and normalization, selector record/edit/delete round-trips, and trigger-log verdict classification, filtering, collapse state and history cap.
+
+---
+
 ## [2.2.0] - 2026-10-27
 
 ### ✨ Design Aesthetics & UI Architecture

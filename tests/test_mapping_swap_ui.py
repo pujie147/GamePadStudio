@@ -254,8 +254,7 @@ def test_local_swap_preserves_action_metadata_without_running_it(swap_owner, act
     binding = ({'action': 'launch', 'executable': 'D:\\游戏\\启动器.exe',
                 'arguments': '--profile "中文"', 'working_directory': 'D:\\游戏'}
                if action == 'launch' else {'action': 'gamepad_macro', 'sequence': [
-                   {'action': 'down', 'value': '0'}, {'action': 'delay', 'duration_ms': 40},
-                   {'action': 'up', 'value': '0'}], 'repeat': False})
+                   {'buttons': ['0'], 'hold_ms': 50, 'gap_ms': 40}], 'repeat': False})
     owner.config['profiles'][profile]['0'] = {'short': binding, 'long': {'action': 'none'}, 'long_press': .81}
     owner.config['profiles'][profile]['1'] = entry('capture')
     owner.store.save()
