@@ -444,6 +444,76 @@ def test_macro_round_trips_through_the_binding_dialog(tmp_path):
         studio.hide()
 
 
+def test_macro_chip_pane_scrolls_instead_of_growing_the_editor(tmp_path):
+    """A long combo must not push the editor past the screen: the chip row scrolls."""
+    from gamepadstudio.studio import Studio
+    from gamepadstudio.mapping_ui import MACRO_FLOW_MAX_HEIGHT, MACRO_STEP_LIMIT
+    app = QApplication.instance() or QApplication([])
+    studio = Studio(tmp_path, standalone=True)
+
+    def build(steps):
+        sequence = [{'buttons': ['9'], 'hold_ms': 50, 'gap_ms': 80} for _ in range(steps)]
+        binding = {'short': {'action': 'gamepad_macro', 'sequence': sequence},
+                   'long': {'action': 'none'}, 'long_press': 0.65}
+        dialog = BindingDialog(studio, trigger='0', mapping=binding, mode='gamepad')
+        dialog.show()
+        app.processEvents()
+        return dialog
+
+    try:
+        heights = {}
+        for steps in (1, 2, MACRO_STEP_LIMIT):
+            dialog = build(steps)
+            heights[steps] = dialog.height()
+            dialog.deleteLater()
+        assert len(set(heights.values())) == 1, heights   # length cannot grow the dialog
+
+        empty = build(0)
+        assert empty.target_selectors['short'].macro_scroll.isHidden()
+        empty.deleteLater()
+
+        big = build(MACRO_STEP_LIMIT)
+        selector = big.target_selectors['short']
+        assert selector.macro_scroll.height() == MACRO_FLOW_MAX_HEIGHT
+        assert selector.macro_canvas.height() > selector.macro_scroll.height()
+        assert selector.macro_scroll.verticalScrollBar().maximum() > 0
+        big.deleteLater()
+    finally:
+        studio.cleanup()
+        studio.hide()
+
+
+def test_binding_dialog_fits_a_handheld_screen(tmp_path):
+    """保存映射 stays clickable even when the screen is only ~540 logical pixels tall."""
+    from gamepadstudio.studio import Studio
+    from gamepadstudio.mapping_ui import MACRO_STEP_LIMIT
+    app = QApplication.instance() or QApplication([])
+    studio = Studio(tmp_path, standalone=True)
+    try:
+        sequence = [{'buttons': ['9'], 'hold_ms': 50, 'gap_ms': 80} for _ in range(MACRO_STEP_LIMIT)]
+        binding = {'short': {'action': 'gamepad_macro', 'sequence': sequence},
+                   'long': {'action': 'gamepad_macro', 'sequence': sequence},
+                   'long_press': 0.65}
+        dialog = BindingDialog(studio, trigger='0', mapping=binding, mode='gamepad')
+        dialog.show()
+        app.processEvents()
+        try:
+            limit = dialog.screen().availableGeometry().height()
+            assert dialog.height() <= limit              # never starts off-screen
+            dialog.resize(660, min(516, limit))          # ROG Ally at 1920x1080 / 200%
+            app.processEvents()
+            bottom = dialog.save_button.mapTo(dialog, dialog.save_button.pos()).y()
+            bottom += dialog.save_button.height()
+            assert bottom <= dialog.height()             # pinned outside the scroll body
+            assert dialog.body_scroll.verticalScrollBar().maximum() > 0   # the rest scrolls in
+        finally:
+            dialog.hide()
+            dialog.deleteLater()
+    finally:
+        studio.cleanup()
+        studio.hide()
+
+
 def test_binding_dialog_pure_gamepad_configuration(tmp_path, monkeypatch):
     from gamepadstudio.studio import Studio
     app = QApplication.instance() or QApplication([])

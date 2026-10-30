@@ -18,6 +18,7 @@ class FlowLayout(QLayout):
     def __init__(self, parent=None, spacing=5):
         super().__init__(parent)
         self.items = []
+        self.offered_width = 0
         self.setContentsMargins(0, 0, 0, 0)
         self.setSpacing(spacing)
 
@@ -44,10 +45,14 @@ class FlowLayout(QLayout):
 
     def setGeometry(self, rect):
         super().setGeometry(rect)
+        self.offered_width = max(0, rect.width())
         self._arrange(rect, False)
 
     def sizeHint(self):
-        return self.minimumSize()
+        flat = self.minimumSize()
+        if self.offered_width <= 0:
+            return flat
+        return QSize(flat.width(), self.heightForWidth(self.offered_width))
 
     def minimumSize(self):
         size = QSize()

@@ -5,7 +5,7 @@ os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
-from gamepadstudio.mapping_deck import MappingDeck
+from gamepadstudio.mapping_deck import FlowLayout, MappingDeck
 from gamepadstudio.studio_core import default_config
 from gamepadstudio.kbm_mapper import NIKKI_PROFILE_NAME
 
@@ -193,3 +193,27 @@ def test_curve_controls_wrap_and_recheck_actual_capabilities(tmp_path):
         assert owner.curve_calls == [('trigger', 'right')]
     finally:
         window.hide()
+
+
+def test_flow_layout_asks_for_every_row_it_wraps():
+    """A wrapping row must report its wrapped height, not the height of one row."""
+    app = QApplication.instance() or QApplication([])
+    host = QWidget()
+    flow = FlowLayout(spacing=5)
+    host.setLayout(flow)
+    for _ in range(10):
+        chip = QWidget()
+        chip.setFixedSize(62, 28)
+        flow.addWidget(chip)
+    assert flow.sizeHint().height() == 28          # no width offered yet: still one row
+    host.resize(700, 600)
+    host.show()
+    app.processEvents()
+    assert flow.sizeHint().height() == 28          # 700px fits every chip on one row
+    host.resize(200, 600)
+    app.processEvents()
+    wrapped = flow.heightForWidth(flow.geometry().width())
+    assert wrapped > 28
+    assert flow.sizeHint().height() == wrapped     # the same width drives both contracts
+    assert flow.minimumSize().height() == 28       # and it may still shrink to a single row
+    host.hide()

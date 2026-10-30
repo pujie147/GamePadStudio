@@ -7,7 +7,7 @@ from PySide6.QtGui import QKeySequence, QColor
 from PySide6.QtWidgets import (QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QLineEdit, QDialogButtonBox, QListWidget, QListWidgetItem,
     QFormLayout, QFileDialog, QMessageBox, QDoubleSpinBox, QGridLayout, QSpinBox, QGroupBox,
-    QCheckBox)
+    QCheckBox, QScrollArea)
 from .mapping_engine import (INPUTS, GAMEPAD_TARGETS, InputNormalizer, canonical_trigger, trigger_label,
                              binding_label, validate_mappings, effective_mappings, profile_family, input_sources)
 from .mapping_deck import FlowLayout
@@ -19,6 +19,9 @@ from .i18n import tr
 MACRO_DELAY_PRESET_MS = 100
 MACRO_STEP_LIMIT = 64
 MACRO_HOLD_LIMITS = (10, 500)
+# Three chip rows stay visible; longer sequences scroll inside the pane so the
+# editor keeps a constant height instead of running past the screen.
+MACRO_FLOW_MAX_HEIGHT = 94
 
 
 def _macro_label(text, parent=None, muted=False):
@@ -163,7 +166,17 @@ class GamepadTargetSelector(QWidget):
         mb_l.addLayout(mb_head)
 
         self.macro_flow = FlowLayout(spacing=5)
-        mb_l.addLayout(self.macro_flow)
+        self.macro_canvas = QWidget()
+        self.macro_canvas.setLayout(self.macro_flow)
+        self.macro_scroll = QScrollArea()
+        self.macro_scroll.setWidget(self.macro_canvas)
+        self.macro_scroll.setWidgetResizable(True)
+        self.macro_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.macro_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # Fixed, not maximum: a pane that only caps its height still gets crushed by the
+        # dialog layout once both gesture boxes are open, which hid the chips again.
+        self.macro_scroll.setFixedHeight(MACRO_FLOW_MAX_HEIGHT)
+        mb_l.addWidget(self.macro_scroll)
 
         mb_opts = QHBoxLayout()
         mb_opts.setSpacing(14)
@@ -255,12 +268,13 @@ class GamepadTargetSelector(QWidget):
                 return '🎯 目标手柄宏: ' + tr('未录制 · 点击上方按键添加连招步骤')
             hold = int(self.macro_hold_spin.value())
             total = sum(hold + int(step['gap_ms']) for step in self.macro_steps)
-            flow = ' › '.join(self._clean_label(step['button']) for step in self.macro_steps)
             flags = [tr('可打断')] if self.macro_interrupt.isChecked() else []
             if self.gesture == 'long' and self.macro_loop.isChecked():
                 flags.append(tr('循环'))
             suffix = (' · ' + ' + '.join(flags)) if flags else ''
-            return (f'🎯 目标手柄宏: {flow}  ({len(self.macro_steps)} 步 · 约 {total} ms{suffix})')
+            # The chip pane below already spells out the sequence; repeating all 64 of
+            # them here would wrap into rows and steal height from a handheld screen.
+            return (f'🎯 目标手柄宏: {len(self.macro_steps)} 步 · 约 {total} ms{suffix}')
         if not self.selected:
             return '请在上方选择目标手柄按键'
         names = [trigger_label(k, self.family) for k in sorted(self.selected, key=lambda x: str(x))]
@@ -345,10 +359,13 @@ class GamepadTargetSelector(QWidget):
             if int(step['gap_ms']) > 0:
                 self.macro_flow.addWidget(self._delay_chip(index, step['gap_ms']))
         empty = not self.macro_steps
+        self.macro_scroll.setVisible(not empty)
         self.macro_hint.setVisible(empty)
         self.macro_hint.setText(tr('点击上方按键录制连招'))
         self.macro_delay_btn.setEnabled(not empty and int(self.macro_steps[-1]['gap_ms']) <= 0)
         self.macro_clear_btn.setEnabled(not empty)
+        self.macro_flow.invalidate()
+        self.macro_canvas.updateGeometry()
         self._update_summary()
 
     def _key_chip(self, index, button):
@@ -524,6 +541,20 @@ class BindingDialog(QDialog):
         top_bar.addWidget(macro_badge)
         layout.addLayout(top_bar)
 
+        # Everything editable scrolls: a handheld at 200% scaling has ~540 logical
+        # pixels of height, and 保存 / 取消 must stay reachable no matter how tall
+        # the body grows.
+        self.body = QWidget()
+        body_l = QVBoxLayout(self.body)
+        body_l.setContentsMargins(0, 0, 0, 0)
+        body_l.setSpacing(14)
+        self.body_scroll = QScrollArea()
+        self.body_scroll.setWidget(self.body)
+        self.body_scroll.setWidgetResizable(True)
+        self.body_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.body_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        layout.addWidget(self.body_scroll, 1)
+
         # Trigger Input Selection
         source_group = QGroupBox(tr('输入来源：手柄按键或触摸手势') if touch_sources(owner.snapshot)
                                  else "触发源 (物理手柄按键 / 组合键)")
@@ -562,7 +593,7 @@ class BindingDialog(QDialog):
         self.live.setStyleSheet(f"color: {TOKENS['ink_2']}; font-weight: 600;")
         capture_row.addWidget(self.live, 1)
         sg_l.addLayout(capture_row)
-        layout.addWidget(source_group)
+        body_l.addWidget(source_group)
 
         if output:
             from .mapping_engine import legacy_action
@@ -781,7 +812,7 @@ class BindingDialog(QDialog):
 
             self.action_combos[gesture] = action
             self.action_boxes[gesture] = box
-            layout.addWidget(box)
+            body_l.addWidget(box)
 
         # Long press timing
         self.timing_box = QWidget()
@@ -796,7 +827,7 @@ class BindingDialog(QDialog):
         self.long_press.setValue(mapping.get('long_press', device_config(owner.config, owner.snapshot).get('long_press', .65)))
         timing.addWidget(self.long_press)
         timing.addStretch()
-        layout.addWidget(self.timing_box)
+        body_l.addWidget(self.timing_box)
 
         # Tip banner
         from .virtual_xinput import virtual_gamepad_backend_available
@@ -815,7 +846,7 @@ class BindingDialog(QDialog):
         tip_lbl.setWordWrap(True)
         tip_lbl.setStyleSheet(f"color: {TOKENS['ink_3']}; font-size: 11px; padding: 4px 0;")
         self.tip_label = tip_lbl
-        layout.addWidget(tip_lbl)
+        body_l.addWidget(tip_lbl)
 
         self.error = QLabel('')
         self.error.setStyleSheet(f"color: {TOKENS['amber']}; font-weight: 600;")
@@ -856,6 +887,19 @@ class BindingDialog(QDialog):
         # can close an editor before showing it, and must also stop its timer.
         self.stop_capture_session()
         super().closeEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # A dialog sized by its own hints can start taller than a handheld screen,
+        # leaving 保存映射 outside it. Show as much of the body as the screen allows
+        # and let the rest scroll.
+        screen = self.screen()
+        if screen is None:
+            return
+        limit = screen.availableGeometry().height() - 24
+        chrome = self.height() - self.body_scroll.viewport().height()
+        wanted = chrome + self.body.sizeHint().height()
+        self.resize(self.width(), max(self.minimumSizeHint().height(), min(wanted, limit)))
 
     def sync_source_kind(self, _index=None, preserve_action=False):
         """A touch source is a completed action, rather than a held chord."""
