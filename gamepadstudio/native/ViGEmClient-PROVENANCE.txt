@@ -1,0 +1,41 @@
+ViGEmClient.dll - provenance and redistribution notes
+
+What this is
+    The user-mode client library of the ViGEm (Virtual Gamepad Emulation)
+    project: it talks to the ViGEmBus kernel driver and creates/emulates an
+    Xbox 360 (XUSB) gamepad target. GamePad Studio needs this DLL to emit real
+    XInput frames; the ViGEmBus *driver package* does not contain it (its MSI
+    payload only ships ViGEmBus.sys/.inf/.cat and devcon.exe), so the client is
+    redistributed here with the app.
+
+Verified identity of the shipped binary
+    File            ViGEmClient.dll
+    Architecture  x64 (PE machine 0x8664) - matches the x64-only installer
+    CompanyName   Nefarius Software Solutions e.U.
+    FileDescription Virtual Gamepad Emulation Framework User-Mode Library
+    FileVersion   1.0.0.1  (the version stamp Nefarius's own builds still use)
+    Imports       SETUPAPI.dll, KERNEL32.dll only -> no VC runtime needed
+    Exports       27 symbols; every function bound by virtual_xinput.py is
+                  present, including vigem_target_x360_register_notification
+                  and vigem_target_x360_unregister_notification
+    SHA-256       see ViGEmClient.dll.sha256 (next to this file)
+
+Where it came from
+    Extracted from the official `vgamepad` 0.2.0 source distribution on PyPI
+    (path vgamepad/win/vigem/client/x64/ViGEmClient.dll), which redistributes
+    Nefarius's build under the MIT license. This is the newest prebuilt client
+    binary obtainable from a package registry: nefarius/ViGEmClient is archived,
+    its GitHub releases carry no binary assets, its AppVeyor project is gone, and
+    the NuGet package Nefarius.ViGEm.Client ships only the .NET wrapper.
+
+License
+    MIT, Copyright (c) 2018 Benjamin Höglinger-Stelzer (Nefarius Software
+    Solutions e.U.) - see ViGEmClient-LICENSE.txt. MIT permits redistribution in
+    a closed-source build as long as the notice is kept, which the PyInstaller
+    spec and the Windows installer both do (copied into licenses/).
+
+Driver side (NOT shipped here, by design)
+    ViGEmBus is retired; the last official release is 1.22.0 (2023-11-02) whose
+    release notes state the driver binary version stays 1.21.442.0. GamePad Studio
+    never installs the driver silently - the app detects it and offers the official
+    download. See docs/continuous-progress.md.

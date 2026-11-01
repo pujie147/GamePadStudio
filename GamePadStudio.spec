@@ -22,6 +22,21 @@ if sys.platform == 'darwin':
         raise RuntimeError('Run python scripts/build_macos_capture.py before packaging macOS.')
     added_binaries.append((capture_helper, 'bin'))
 
+# ViGEmClient.dll is the user-mode half of ViGEm: the ViGEmBus driver package only
+# ships ViGEmBus.sys/.inf/.cat, so without this the virtual XInput pad silently
+# never connects. Kept in-package (gamepadstudio/native/) because that is the first
+# candidate virtual_xinput.client_dll_candidates() checks in both source and frozen
+# layouts; the MIT notice and provenance ride along in licenses/.
+if sys.platform == 'win32':
+    vigem_client_dll = 'gamepadstudio/native/ViGEmClient.dll'
+    if not os.path.isfile(vigem_client_dll):
+        raise RuntimeError(f'{vigem_client_dll} is missing; the packaged app could not emit virtual XInput frames.')
+    added_binaries.append((vigem_client_dll, 'gamepadstudio/native'))
+    added_files += [
+        ('gamepadstudio/native/ViGEmClient-LICENSE.txt', 'licenses'),
+        ('gamepadstudio/native/ViGEmClient-PROVENANCE.txt', 'licenses'),
+    ]
+
 # Keep the runtime path stable regardless of the wheel's versioned filename.
 # TOCs use (destination, source, type); preserve executable permissions and
 # PyInstaller signing by including FFmpeg as a binary instead of data.
@@ -124,7 +139,9 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=True,
-    upx_exclude=[],
+    # UPX-packing the ViGEm client can break its export table and trips AV on
+    # a driver-adjacent binary; leave it byte-identical to the verified SHA-256.
+    upx_exclude=['ViGEmClient.dll'],
     name='GamePadStudio',
 )
 

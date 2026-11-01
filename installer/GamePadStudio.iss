@@ -31,6 +31,11 @@ Name: "startup"; Description: "登录 Windows 后自动启动后台映射"; Grou
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "快捷方式："; Flags: unchecked
 
 [Files]
+; The recursive copy below is what delivers gamepad output: it carries
+; _internal\gamepadstudio\native\ViGEmClient.dll (the ViGEm user-mode client, which
+; the ViGEmBus driver package does NOT ship) plus its MIT notice in licenses\.
+; Do not narrow this wildcard or add Excludes for *.dll - that silently disables
+; the virtual XInput pad while the UI still offers 手柄输出.
 Source: "..\dist\GamePadStudio\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; Keep shortcuts created under the original product name on the current binary.
 Source: "..\dist\GamePadStudio\GamePadStudio.exe"; DestDir: "{app}"; DestName: "DualSenseStudio.exe"; Flags: ignoreversion

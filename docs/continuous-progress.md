@@ -24,7 +24,25 @@
 | **键鼠切换保持：本轮完成；按住连发：保留候选** | [reWASD Rapid Fire](https://help.rewasd.com/mapping-features/rapid-fire.html)、[Steam Input Activators](https://partner.steamgames.com/doc/features/steam_controller/activators)、[JoyToKey 变更记录](https://joytokey.net/en/news) | KBM 的 `hold`、`mouse_hold` 现可按一次保持、再次取消，入口在现有绑定编辑器；可调重复触发尚未实现。现有名为 `gamepad_turbo` 的选项不能据此认定真实手柄连发已支持，见下方能力核实。 | 已覆盖键鼠输出引用计数、按键共享和取消路径；后续连发仍需独立验证重复时钟、组合键优先与释放规则。一次性触摸源不展示「按住连发」。不以稳定版依据推广 [JoyToKey 7.4.0 beta 时序命令](https://joytokey.net/en/posts/command-input/)。 |
 | **RS 静止漂移测量与居中容错建议：第六轮完成** | [AntiMicroX 摇杆校准接口](https://antimicrox.github.io/doxygen/classJoyControlStick.html)、[Valve 发布的逐摇杆死区与自动校准](https://store.steampowered.com/news/posts/?enddate=1526517539&feed=steam_client) | 测试页 `StickHistory` 只有轨迹、圆度与覆盖，没有「松开摇杆→采样→结果→应用」流程；用户仍凭感觉调整。入口在已有摇杆测试卡片，结果应用到当前预设的视角手感。Valve 链接属于历史发布依据，不代表当前界面位置。 | 真实 RS 双轴和足量稳定样本；移动、断线、换设备取消；结果说明软件容错含义。实际右摇杆视角死区是 `profile_options.mouse.deadzone`，左摇杆方向由 `input.stick_press/release` 控制；不能只写静态设备 `deadzone` 冒充生效。不宣称固件修复。 |
 | **陀螺仪镜头／瞄准：待实机能力核实** | [reWASD Gyroscope](https://help.rewasd.com/how-to-remap/gyroscope.html)、[AntiMicroX 控制器输入能力](https://github.com/AntiMicroX/antimicrox) | 对支持传感器的设备可能改善细微镜头调整，但当前 `Device` 没有 SDL sensor 能力检测或传感器读取，不能直接展示可用选项。自然入口可能是现有镜头手感。 | 先核实实际连接设备、USB／蓝牙、SDL 传感器读取、单位、采样及漂移校准；再验证激活方式、与右摇杆／触摸协作和取消路径。未过实机门槛前不进入功能集成目标。 |
-| **真实虚拟手柄输出：暂缓** | [reWASD Native Mapping](https://help.rewasd.com/types-of-mappings/gamepad-mapping.html)、[ViGEmBus 退役声明](https://docs.nefarius.at/projects/ViGEm/End-of-Life/) | 当前游戏手柄动作只有内存状态，没有真实系统虚拟手柄输出；这是既有功能完整性的缺口，不是已经支持后可继续增加的高级能力。 | 需要维护中的输出后端、驱动许可／安装与真实游戏检测验证。ViGEmBus 和客户端已退役，不能把旧依赖接入当成长期可维护路径，也不自动安装驱动。 |
+| **真实虚拟手柄输出：客户端已接入，总线与真实输出已验收** | [reWASD Native Mapping](https://help.rewasd.com/types-of-mappings/gamepad-mapping.html)、[ViGEmBus 退役声明](https://docs.nefarius.at/projects/ViGEm/End-of-Life/)、[nefarius/ViGEmClient（已归档）](https://github.com/nefarius/ViGEmClient) | `virtual_xinput.py` 已把 `XUSB_REPORT` 帧送到 ViGEmBus 建出的真实 XInput 设备，本机测量确认按键、扳机、摇杆、十字键与震动回执均按位落地，20 Hz 连发持续 60 秒零丢帧（见下节，`tests/test_virtual_gamepad_output.py` 20 项）。此前"不能调用 ViGEmBus"的原因是**缺用户态 `ViGEmClient.dll`**，与驱动无关：驱动包只含 `ViGEmBus.sys/.inf/.cat/devcon.exe`，客户端库必须由应用自带，而官方 releases 无二进制附件、AppVeyor 已下线、NuGet 只有 C# 包装层。现按 MIT 许可随包携带 x64 客户端并校验导出符号。 | 不自动安装驱动；驱动仍是退役中的 ViGEmBus，长期可维护性风险保留记录。仍待：真实游戏（PoE2／WeGame）人工确认接受该手柄。 |
+
+### 2026-10-30 虚拟手柄输出实机核查
+
+本机驱动状态：`ViGEmBus.sys` 1.21.442.0，服务 Running，设备 `ROOT\SYSTEM\0001` OK；系统内**不存在任何 `ViGEmClient.dll`**（`Program Files\Nefarius Software Solutions` 目录不存在），`ctypes.CDLL('ViGEmClient.dll')` 报 module not found，因此 `VirtualXInputPad.connect()` 一直返回 False，而旧的 `virtual_gamepad_backend_available()` 仅凭 `ViGEmBus.sys` 存在就返回 True ——界面据此宣称"已检测到虚拟手柄后端"，属于假阳性，已改为要求客户端库可加载且 `vigem_connect` 握手成功。
+
+携带的 x64 客户端经 `pefile` 核验：`CompanyName=Nefarius Software Solutions e.U.`、machine 0x8664、仅依赖 `SETUPAPI/KERNEL32`（无 VC 运行库）、27 个导出符号包含本项目绑定的全部函数与 `vigem_target_x360_register_notification/unregister_notification`；official master 的 `.rc` 亦标注 `FILEVERSION 1,0,0,1`，与其二进制版本戳一致，master 相比多出的 4 个 API 均为 DS4 专用。SHA-256 与来源记录在 `gamepadstudio/native/`。
+
+在会话可交互时测得（`xinput1_4.dll!XInputGetState` 直接读取，即游戏所见接口）：连接耗时 19–90 ms；新建设备以 `0x045E:0x028E` 身份占用一个 XInput 用户索引，SDL 侧显示为 11 键 6 轴手柄；`A|LB|RB|UP|RIGHT + LS(1.0,-1.0) + LT 50% + RT 90%` 一帧还原为 `wButtons=0x1309、LSX=+32767、LSY=+32767、LT=128、RT=230`，`reset()` 后全零；16 Hz 脉冲队列部 packet number 逐帧递增且 A 位正确翻转；外部独立进程轮询可见 39 个不同 packet、36 次 A 翻转，证明跨进程投递有效；`XInputSetState(0xFFFF, 0x8000)` 触发本项目的震动回调，收到 `(1.0, 0.5)` 与结束时的 `(0.0, 0.0)`；`close()` 释放用户索引。
+
+发现的真实缺陷并已修复：新建 target 在应用发出第一帧之前向游戏呈现 `LS=(-3356,-1869) RS=(-3255,-848)`（约满量程 10%），且该幻象值在多次连接、多个进程中完全相同；由于 ViGEmBus 会丢弃与驱动内部全零初值相同的报表，首个"全零帧"不生效，偏移会一直挂着——在 ROG Ally 上即表现为接上虚拟手柄瞬间视角漂移。修法是连接成功后先推一帧 `sThumbLX=1`（满量程 0.003%，远低于任何死区）再推中位帧，实测 `connect()` 返回时设备已是 `pkt=3` 全零。
+
+锁屏期间的读数异常已排除：工作站进入锁屏／安全桌面后（两个 `LogonUI` + `consent` 存活，`query session` 显示用户会话"断开"，SDL 报 `No displays available`），XInput 状态读数会在若干帧后停在同一 packet 不再推进，与写入频率无关，一度看起来像驱动丢帧。解锁后在活动桌面重跑同一测项即完全正常，因此**该现象属于锁屏条件下的读数条件差异，不能用作驱动或本项目丢帧的证据**。
+
+2026-10-31 解锁后复验（`tests/test_virtual_gamepad_output.py`，20 项全通过）：总线握手不建设备（前后 XInput 槽位差分一致）；真实 target 可被 `XInputGetState` 读到且 `vigem_target_is_attached` 为真；连接后四轴均为 0（幻象偏移已由 `connect()` 的 prime 帧清除）；11 组按键／十字键／摇杆／扳机向量逐字节还原，含 Y 轴取向两个对照用例（SDL `ry=-1.0` 上 → XUSB `+32767`，`+1.0` 下 → `-32767`）；`reset()` 后无残留按住；连续 6 帧 packet number 严格递增；**20 Hz 连发 1200 帧持续 60 秒，实际速率 20.0 Hz、`vigem_target_x360_update` 返回码零错误，独立进程以 10 ms 采样得到 4764 个读数、LT 帧计数 0–255 完整绕 4.7 圈、序列零缺口、A 位与计数奇偶 100% 同相**；`close()` 释放槽位；两个 target 可共存且各报各的状态。跨进程读数即"游戏所见"，写端与读端为不同进程，规避了同进程 XInput 缓存。
+
+仍未验收：真实游戏（PoE2／WeGame）是否接受该虚拟手柄，需要游戏开着做人工确认。
+
+驱动侧遗留状态需单独处理，与本次客户端修复无关：本机驱动库中现存两份 `vigembus.inf`——`oem53.inf`=1.21.442.0 与 `oem58.inf`=1.17.333.0（2020-12-14），且 `ROOT\SYSTEM\0001` 已被改绑到**更旧的 oem58.inf**，磁盘加载的 `.sys` 仍是 1.21.442.0，服务 Running。旧的 1.17 包来自 vgamepad sdist 自带的 `ViGEmBusSetup_x64.msi`（解析其文件表得到 `Driver1.17.333.0` 与 `devcon.exe`），并非 1.22.0 bundle。官方 1.22.0 bundle（已验签：签名者 Nefarius Software Solutions e.U.，DigiCert 颁发，SHA-256 `89220a78…4c6a`，大小与 GitHub 资产一致）在本机以 `/install /quiet /norestart` 运行返回 `0xE0000001` 且未产生任何日志，未注册卸载项，即安装未真正执行；release note 亦声明 "Driver version remains unchanged"（内核二进制仍为 1.21.442.0）与"就地升级需重跑 setup"。多包共存是已知冲突源（下次设备重枚举可能被旧包接管），清库与升级留待单独处理。
 
 ### 现有输出能力核实
 
