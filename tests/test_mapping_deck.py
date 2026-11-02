@@ -65,10 +65,12 @@ def test_combo_chips_use_canonical_triggers_and_edit_current_profile(tmp_path):
     assert selected == ['9+10']
     assert deck.selected_trigger == '9+10'
     assert key_tokens(deck.short_card) == ['9', '10', '2', '3']
+    deck.short_card.click()
+    assert owner.edits[-1] == ('9+10', {'profile': '主机体验', 'mode': 'gamepad', 'gesture': 'short'})
     deck.long_card.click()
-    assert owner.edits[-1] == ('9+10', {'profile': '主机体验', 'mode': 'gamepad'})
+    assert owner.edits[-1] == ('9+10', {'profile': '主机体验', 'mode': 'gamepad', 'gesture': 'long'})
     deck.combo_btn.click()
-    assert owner.edits[-1] == ('9+10', {'new': True, 'profile': '主机体验', 'mode': 'gamepad'})
+    assert owner.edits[-1] == ('9+10', {'new': True, 'profile': '主机体验', 'mode': 'gamepad', 'gesture': 'combo'})
     deck.set_trigger('RB+LB')
     assert selected == ['9+10']  # External synchronisation does not loop back.
     assert deck.selected_trigger == '9+10'
@@ -115,7 +117,22 @@ def test_modifier_appears_first_without_changing_edit_target(tmp_path):
     assert key_tokens(deck.short_card) == ['9', '0', '0']
     assert key_tokens(deck.combo_buttons['0+9']) == ['9', '0']
     deck.short_card.click()
-    assert owner.edits[-1] == ('0+9', {'profile': '主机体验', 'mode': 'gamepad'})
+    assert owner.edits[-1] == ('0+9', {'profile': '主机体验', 'mode': 'gamepad', 'gesture': 'short'})
+
+
+def test_a_chord_without_an_action_stays_listed_only_while_it_is_open(tmp_path):
+    app()
+    owner = Owner(tmp_path)
+    deck = MappingDeck(owner)
+    owner.config['profiles'][owner.profile]['0+9'] = {'short': {'action': 'none'}, 'long': {'action': 'none'}}
+    deck.focus_combo('0+9')
+    flush()
+    assert deck.selected_trigger == '0+9'
+    assert '0+9' in deck.combo_buttons
+    assert any('新组合已创建' in label.text() for label in deck.findChildren(QLabel))
+    deck.set_trigger('0')
+    assert '0+9' not in deck.combo_buttons
+    assert deck.pending_combo is None
 
 
 def test_four_key_input_and_output_wrap_within_narrow_deck(tmp_path):

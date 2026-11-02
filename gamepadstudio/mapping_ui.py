@@ -488,7 +488,9 @@ class KeySequenceField(QLineEdit):
 class BindingDialog(QDialog):
     """Configuration dialog supporting either pure Gamepad macro editing or pure Virtual KBM editing."""
 
-    def __init__(self, owner, trigger='0', mapping=None, output=None, new=False, profile=None, mode=None):
+    GESTURE_SCOPES = ('short', 'long', 'combo')
+
+    def __init__(self, owner, trigger='0', mapping=None, output=None, new=False, profile=None, mode=None, gesture=None):
         super().__init__(owner)
         self.owner = owner
         self.new_binding = new
@@ -498,6 +500,8 @@ class BindingDialog(QDialog):
         self.context_changed = False
         self.original_trigger = canonical_trigger(trigger)
         self.touch_gesture = self.original_trigger.startswith('TP:')
+        # Opening the editor from one gesture card should show only that card's content.
+        self.gesture_scope = gesture if gesture in self.GESTURE_SCOPES else None
 
         # Resolve mode: 'gamepad' or 'kbm'
         mapping = copy.deepcopy(mapping or {})
@@ -512,8 +516,7 @@ class BindingDialog(QDialog):
         self.available_inputs = input_sources(owner.snapshot)
 
         from .i18n import tr
-        title = tr('编辑触摸板手势') if self.touch_gesture else tr('编辑手柄输出配置' if self.mode == 'gamepad' else '编辑虚拟键鼠映射')
-        self.setWindowTitle(title)
+        self.setWindowTitle(self._title(self.touch_gesture))
         self.setMinimumWidth(520 if self.touch_gesture else 660)
         self.normalizer = InputNormalizer()
         self.touch_recognizer = TouchGestureRecognizer()
@@ -532,10 +535,7 @@ class BindingDialog(QDialog):
         prof_title.setStyleSheet(f"font-size: 13.5px; font-weight: 700; color: {TOKENS['accent'] if self.mode == 'gamepad' else TOKENS['cyan']};")
         top_bar.addWidget(prof_title, 1)
 
-        badge_text = tr('手柄输出配置') if self.mode == 'gamepad' else '手柄 ➔ 虚拟键鼠 映射生产'
-        if self.touch_gesture:
-            badge_text = tr('触摸板 → 键鼠与快捷动作')
-        macro_badge = QLabel(badge_text)
+        macro_badge = QLabel(self._badge(self.touch_gesture))
         self.mode_badge = macro_badge
         macro_badge.setStyleSheet(f"background: {TOKENS['surface']}; color: {TOKENS['cyan'] if self.mode == 'gamepad' else TOKENS['accent']}; padding: 3px 8px; border-radius: 4px; font-weight: 600; font-size: 11px;")
         top_bar.addWidget(macro_badge)
@@ -556,10 +556,13 @@ class BindingDialog(QDialog):
         layout.addWidget(self.body_scroll, 1)
 
         # Trigger Input Selection
-        source_group = QGroupBox(tr('输入来源：手柄按键或触摸手势') if touch_sources(owner.snapshot)
-                                 else "触发源 (物理手柄按键 / 组合键)")
-        source_group.setStyleSheet(f"QGroupBox {{ font-weight: 700; color: {TOKENS['ink']}; }}")
-        sg_l = QVBoxLayout(source_group)
+        if self.gesture_scope == 'combo':
+            source_title = tr('组合按键（至少两个）')
+        else:
+            source_title = tr('输入来源：手柄按键或触摸手势') if touch_sources(owner.snapshot) else tr('触发源 (物理手柄按键 / 组合键)')
+        self.source_group = QGroupBox(source_title)
+        self.source_group.setStyleSheet(f"QGroupBox {{ font-weight: 700; color: {TOKENS['ink']}; }}")
+        sg_l = QVBoxLayout(self.source_group)
         sg_l.setSpacing(8)
 
         source = QHBoxLayout()
@@ -593,7 +596,16 @@ class BindingDialog(QDialog):
         self.live.setStyleSheet(f"color: {TOKENS['ink_2']}; font-weight: 600;")
         capture_row.addWidget(self.live, 1)
         sg_l.addLayout(capture_row)
-        body_l.addWidget(source_group)
+        body_l.addWidget(self.source_group)
+
+        # A gesture-scoped page inherits its input from the card that opened it, so the
+        # source row becomes context rather than an editable field.
+        self.source_summary = QLabel(self._source_summary_text(), self.body)
+        self.source_summary.setStyleSheet(
+            f"color: {TOKENS['ink_2']}; font-weight: 600; font-size: 12.5px;"
+            f"padding: 6px 8px; background: {TOKENS['surface']}; border-radius: 6px;")
+        body_l.addWidget(self.source_summary)
+        self.source_summary.hide()
 
         if output:
             from .mapping_engine import legacy_action
@@ -830,19 +842,7 @@ class BindingDialog(QDialog):
         body_l.addWidget(self.timing_box)
 
         # Tip banner
-        from .virtual_xinput import virtual_gamepad_backend_available
-        has_vpad = virtual_gamepad_backend_available()
-        if self.touch_gesture:
-            tip_text = tr('每个手势触发一次动作；按下触摸板仍使用独立按键映射。')
-        elif self.mode == 'gamepad':
-            tip_text = (
-                tr('手柄输出配置；已检测到虚拟手柄后端（ViGEmBus / VirtualHID），实时合成标准 XInput 报告。')
-                if has_vpad else
-                tr('手柄输出配置；当前未接入系统虚拟手柄驱动后端。若需在游戏内高频自动连发，请切换到虚拟键鼠模式使用“按住高频连发 (Turbo)”。')
-            )
-        else:
-            tip_text = '💡 虚拟键鼠模拟：将物理手柄输入无缝转换为真实键盘按键、鼠标点击、滚轮或应用快捷键。'
-        tip_lbl = QLabel(tip_text)
+        tip_lbl = QLabel('')
         tip_lbl.setWordWrap(True)
         tip_lbl.setStyleSheet(f"color: {TOKENS['ink_3']}; font-size: 11px; padding: 4px 0;")
         self.tip_label = tip_lbl
@@ -855,7 +855,7 @@ class BindingDialog(QDialog):
 
         controls = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         self.save_button = controls.button(QDialogButtonBox.Save)
-        controls.button(QDialogButtonBox.Save).setText('保存映射')
+        controls.button(QDialogButtonBox.Save).setText(tr('保存组合') if self.gesture_scope == 'combo' else tr('保存映射'))
         controls.button(QDialogButtonBox.Cancel).setText('取消')
         controls.accepted.connect(self.validate)
         controls.rejected.connect(self.reject)
@@ -901,6 +901,72 @@ class BindingDialog(QDialog):
         wanted = chrome + self.body.sizeHint().height()
         self.resize(self.width(), max(self.minimumSizeHint().height(), min(wanted, limit)))
 
+    def _title(self, touch):
+        if touch:
+            return tr('编辑触摸板手势')
+        if self.gesture_scope == 'short':
+            return tr('编辑短按映射')
+        if self.gesture_scope == 'long':
+            return tr('编辑长按映射')
+        if self.gesture_scope == 'combo':
+            return tr('添加组合') if self.new_binding else tr('编辑组合按键')
+        return tr('编辑手柄输出配置' if self.mode == 'gamepad' else '编辑虚拟键鼠映射')
+
+    def _badge(self, touch):
+        if touch:
+            return tr('触摸板 → 键鼠与快捷动作')
+        if self.gesture_scope == 'short':
+            return tr('手柄输出 · 短按')
+        if self.gesture_scope == 'long':
+            return tr('手柄输出 · 长按')
+        if self.gesture_scope == 'combo':
+            return tr('手柄输出 · 组合')
+        return tr('手柄输出配置') if self.mode == 'gamepad' else tr('手柄 ➔ 虚拟键鼠 映射生产')
+
+    def _tip(self, touch):
+        if touch:
+            return tr('每个手势触发一次动作；按下触摸板仍使用独立按键映射。')
+        if self.gesture_scope == 'short':
+            return tr('短按：按下按键后立即触发的动作。')
+        if self.gesture_scope == 'long':
+            return tr('长按：按住超过下面的阈值才触发；阈值越短越灵敏。')
+        if self.gesture_scope == 'combo':
+            return tr('组合：同时按住多个按键会成为一个新输入。保存后在一级页为它设置短按或长按动作。')
+        from .virtual_xinput import virtual_gamepad_backend_available
+        if self.mode == 'gamepad':
+            return (
+                tr('手柄输出配置；已检测到虚拟手柄后端（ViGEmBus / VirtualHID），实时合成标准 XInput 报告。')
+                if virtual_gamepad_backend_available() else
+                tr('手柄输出配置；当前未接入系统虚拟手柄驱动后端。若需在游戏内高频自动连发，请切换到虚拟键鼠模式使用“按住高频连发 (Turbo)”。')
+            )
+        return tr('选择手柄按键或触摸手势，也可以点击录入后实际操作。')
+
+    def _source_summary_text(self):
+        chord = '+' in self.original_trigger
+        return f"{tr('组合输入') if chord else tr('当前按键')}：{trigger_label(self.original_trigger, self.family)}"
+
+    def _gestures_shown(self):
+        """Which gesture sections this page owns; a touch action never has a long variant."""
+        if self.touch_gesture or self.gesture_scope == 'short':
+            return ('short',)
+        if self.gesture_scope == 'long':
+            return ('long',)
+        if self.gesture_scope == 'combo':
+            return ()
+        return ('short', 'long')
+
+    def _apply_scope(self):
+        shown = self._gestures_shown()
+        for gesture, box in self.action_boxes.items():
+            box.setVisible(gesture in shown)
+        self.timing_box.setVisible('long' in shown)
+        self.long_press.setVisible('long' in shown)
+        read_only_source = self.gesture_scope in ('short', 'long') and not self.touch_gesture
+        self.source_group.setVisible(not read_only_source)
+        self.source_summary.setVisible(read_only_source)
+        if read_only_source:
+            self.source_summary.setText(self._source_summary_text())
+
     def sync_source_kind(self, _index=None, preserve_action=False):
         """A touch source is a completed action, rather than a held chord."""
         from .i18n import tr
@@ -919,9 +985,7 @@ class BindingDialog(QDialog):
             combo.setVisible(not touch)
             combo.setEnabled(not touch and not self.context_changed)
         self.action_boxes['short'].setTitle(tr('触发动作') if touch else '短按 (SHORT PRESS)')
-        self.action_boxes['long'].setVisible(not touch)
-        self.timing_box.setVisible(not touch)
-        self.long_press.setVisible(not touch)
+        self._apply_scope()
         if touch != previous_touch or preserve_action:
             for gesture, action in self.action_combos.items():
                 selected = self.action_mode_memory.get(kind, {}).get(gesture, action.currentData())
@@ -939,21 +1003,9 @@ class BindingDialog(QDialog):
                 action.setCurrentIndex(max(0, action.findData(selected)))
                 action.blockSignals(False)
                 action.currentIndexChanged.emit(action.currentIndex())
-        self.setWindowTitle(tr('编辑触摸板手势') if touch else
-                            tr('编辑手柄输出配置' if self.mode == 'gamepad' else '编辑虚拟键鼠映射'))
-        self.mode_badge.setText(tr('触摸板 → 键鼠与快捷动作') if touch else
-                                tr('手柄输出配置') if self.mode == 'gamepad' else '手柄 ➔ 虚拟键鼠 映射生产')
-        if touch:
-            self.tip_label.setText(tr('每个手势触发一次动作；按下触摸板仍使用独立按键映射。'))
-        elif self.mode == 'kbm':
-            self.tip_label.setText(tr('选择手柄按键或触摸手势，也可以点击录入后实际操作。'))
-        else:
-            from .virtual_xinput import virtual_gamepad_backend_available
-            self.tip_label.setText(
-                tr('手柄输出配置；已检测到虚拟手柄后端（ViGEmBus / VirtualHID），实时合成标准 XInput 报告。')
-                if virtual_gamepad_backend_available() else
-                tr('手柄输出配置；当前未接入系统虚拟手柄驱动后端。若需在游戏内高频自动连发，请切换到虚拟键鼠模式使用“按住高频连发 (Turbo)”。')
-            )
+        self.setWindowTitle(self._title(touch))
+        self.mode_badge.setText(self._badge(touch))
+        self.tip_label.setText(self._tip(touch))
 
     @staticmethod
     def _device_context(state):
@@ -1118,13 +1170,14 @@ class BindingDialog(QDialog):
             if not self.check_device_context():
                 return
             if self.capturing:
-                from .i18n import tr
                 raise ValueError(tr('请先完成输入来源录入'))
             val = self.value()
             for gesture in (('short',) if self.touch_gesture else ('short', 'long')):
                 if val[gesture].get('action') == 'gamepad_macro' and not val[gesture].get('sequence'):
                     raise ValueError(tr('宏流程为空：请先点击上方按键录制至少一个步骤'))
             trig = self.trigger()
+            if self.gesture_scope == 'combo' and len(set(trig.split('+'))) < 2:
+                raise ValueError(tr('组合至少需要两个不同的按键'))
             if not set(trig.split('+')) <= set(input_sources(self.owner.snapshot)):
                 raise ValueError('请选择当前手柄支持的输入按键')
             validate_mappings({trig: val})

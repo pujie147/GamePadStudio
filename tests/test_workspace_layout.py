@@ -4,8 +4,9 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QInputDialog, QMessageBox, QScrollArea
+from PySide6.QtWidgets import QApplication, QDialog, QInputDialog, QLabel, QMessageBox, QScrollArea
 
+from gamepadstudio.mapping_ui import BindingDialog
 from gamepadstudio.studio import Studio, STYLE
 from gamepadstudio.kbm_mapper import NIKKI_PROFILE_NAME
 
@@ -128,7 +129,7 @@ def test_combination_cards_and_controller_selection_follow_the_displayed_gamepad
     assert window.mapping_art.selected_buttons == {9, 10}
     assert {key for key, (box, _) in window.mapping_boxes.items() if box.isChecked()} == {9, 10}
     QTest.mouseClick(deck.short_card, Qt.LeftButton)
-    assert edits[-1] == (('9+10',), {'profile': '动作与格斗宏', 'mode': 'gamepad'})
+    assert edits[-1] == (('9+10',), {'profile': '动作与格斗宏', 'mode': 'gamepad', 'gesture': 'short'})
     window.refresh_mappings()
     assert deck.selected_trigger == '9+10'
     window.update_controller_ui(None)
@@ -137,6 +138,19 @@ def test_combination_cards_and_controller_selection_follow_the_displayed_gamepad
     assert all(action['action'] == 'none' for action in window.config['profiles']['动作与格斗宏']['9+10'].values())
     assert deck.selected_trigger == '9+10'
     assert '9+10' not in deck.combo_buttons
+
+
+def test_a_new_combination_lands_on_the_cards_that_give_it_an_action(workspace, monkeypatch):
+    window = workspace
+    window.navigate(1)
+    monkeypatch.setattr(BindingDialog, 'exec', lambda dialog: QDialog.Accepted)
+    deck = window.mapping_deck
+    deck.combo_btn.click()
+    assert deck.selected_trigger == '9+10'
+    assert '9+10' in deck.combo_buttons
+    assert any('新组合已创建' in label.text() for label in deck.findChildren(QLabel))
+    assert all(window.config['profiles'][deck._profile()]['9+10'][g]['action'] == 'none'
+               for g in ('short', 'long'))
 
 
 def test_deleting_displayed_gamepad_profile_keeps_active_keyboard_profile(workspace, monkeypatch):

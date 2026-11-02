@@ -2905,7 +2905,7 @@ class Studio(GlassWindow):
         except (ValueError, OSError) as exc:
             self.notify(tr(str(exc))); return False
 
-    def edit_mapping(self, key, new=False, output=None, capture=False, profile=None, mode=None):
+    def edit_mapping(self, key, new=False, output=None, capture=False, profile=None, mode=None, gesture=None):
         target_profile = profile or (self.virtual_kbm_page.current_scheme() if self.stack.currentIndex() == 6 else self.current_gamepad_profile())
         if target_profile not in self.store.profiles_for(self.snapshot):
             self.notify(tr('输入设备已变化，请重新打开映射编辑。'))
@@ -2917,17 +2917,22 @@ class Studio(GlassWindow):
         from .studio_core import profile_mode
         target_mode = mode or profile_mode(self.config, target_profile)
         mapping = {} if new else effective_mappings(self.config, self.snapshot, target_profile).get(str(key), {})
-        dialog = BindingDialog(self, key, mapping, output=output, new=new, profile=target_profile, mode=target_mode)
+        dialog = BindingDialog(self, key, mapping, output=output, new=new, profile=target_profile, mode=target_mode,
+                               gesture=gesture)
         if capture:
             dialog.start_capture()
         if dialog.exec() == QDialog.Accepted:
-            self.mapping_change({
-                'op': 'binding',
-                'profile': dialog.profile,
-                'trigger': dialog.trigger(),
-                'previous_trigger': None if new else str(key),
-                'mapping': dialog.value()
-            })
+            trigger = dialog.trigger()
+            if self.mapping_change({
+                    'op': 'binding',
+                    'profile': dialog.profile,
+                    'trigger': trigger,
+                    'previous_trigger': None if new else str(key),
+                    'mapping': dialog.value()
+            }) and gesture == 'combo':
+                # The chord page defines the input only, so hand the user straight to
+                # the gesture cards that give it an action.
+                self.mapping_deck.focus_combo(trigger)
         dialog.deleteLater()
         if self.remote:
             self.client.send('suspend', seconds=2 if QApplication.activeModalWidget() is not None else 0)

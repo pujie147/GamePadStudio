@@ -228,6 +228,9 @@ class MappingDeck(QWidget):
         self.active = set()
         self._feedback_data = {}
         self.combo_buttons = {}
+        # A chord created by 添加组合 only carries its keys until the user picks an
+        # action for it; keep it listed while they are still on it.
+        self.pending_combo = None
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -267,8 +270,8 @@ class MappingDeck(QWidget):
         layout.addWidget(self.curve_controls)
         self.short_card = ActionCard('short', self)
         self.long_card = ActionCard('long', self)
-        self.short_card.clicked.connect(self.edit)
-        self.long_card.clicked.connect(self.edit)
+        self.short_card.clicked.connect(lambda checked=False: self.edit('short'))
+        self.long_card.clicked.connect(lambda checked=False: self.edit('long'))
         layout.addWidget(self.short_card)
         layout.addWidget(self.long_card)
         combo_header = QHBoxLayout()
@@ -302,6 +305,11 @@ class MappingDeck(QWidget):
         state = getattr(self.owner, 'snapshot', None)
         family = profile_family(config, state, profile)
         mappings = effective_mappings(config, state, profile)
+        if self.pending_combo and self.pending_combo != self.selected_trigger:
+            self.pending_combo = None
+        awaiting_action = (self.pending_combo and
+                           all(mappings.get(self.pending_combo, {}).get(g, {}).get('action', 'none') == 'none'
+                               for g in ('short', 'long')))
         entry = mappings.get(self.selected_trigger, {})
         _clear(self.input_keys)
         self.input_heading.setText(tr('组合输入') if '+' in self.selected_trigger else tr('当前按键'))
@@ -320,10 +328,15 @@ class MappingDeck(QWidget):
         self.combo_btn.setText('+ ' + tr('添加组合'))
         _clear(self.combo_layout)
         self.combo_buttons = {}
+        if awaiting_action:
+            self.combo_layout.addWidget(_text(tr('新组合已创建 · 请在上方短按或长按卡片设置动作'), self))
         for raw_trigger, mapping in mappings.items():
-            if '+' not in raw_trigger or all(mapping.get(g, {}).get('action', 'none') == 'none' for g in ('short', 'long')):
+            if '+' not in raw_trigger:
                 continue
             trigger = canonical_trigger(raw_trigger)
+            if (all(mapping.get(g, {}).get('action', 'none') == 'none' for g in ('short', 'long'))
+                    and trigger != self.pending_combo):
+                continue
             button = ComboButton(self)
             button.setCursor(Qt.PointingHandCursor)
             button.setCheckable(True)
@@ -389,13 +402,21 @@ class MappingDeck(QWidget):
         if not self.curve_buttons[kind].isHidden():
             self.owner.open_curve_editor(kind, channel=self.curve_channel(kind))
 
-    def edit(self):
-        self.owner.edit_mapping(self.selected_trigger, profile=self._profile(), mode='gamepad')
+    def edit(self, gesture='short'):
+        self.owner.edit_mapping(self.selected_trigger, profile=self._profile(), mode='gamepad', gesture=gesture)
 
     def add(self):
-        self.owner.edit_mapping('9+10', new=True, profile=self._profile(), mode='gamepad')
+        self.owner.edit_mapping('9+10', new=True, profile=self._profile(), mode='gamepad', gesture='combo')
+
+    def focus_combo(self, trigger):
+        """Land on a chord the user just defined: its gesture cards are the next step."""
+        trigger = canonical_trigger(trigger)
+        self.pending_combo = trigger
+        self.set_trigger(trigger)
+        self.trigger_selected.emit(trigger)
 
     def clear(self):
+        self.pending_combo = None
         self.owner.mapping_change({'op': 'unbind', 'trigger': self.selected_trigger, 'profile': self._profile()})
 
     def swap(self):
