@@ -13,6 +13,45 @@ os.environ.setdefault('PYGAME_HIDE_SUPPORT_PROMPT', '1')
 
 
 @pytest.fixture(autouse=True)
+def block_real_hidhide_driver(monkeypatch):
+    """测试绝不能读写这台机器的 HidHide 配置。
+
+    控制设备是独占的，而且配置持久保存：一次漏网的写入会留下真实的隐藏条目，
+    把开发机的手柄藏起来。这里给出一个良性假会话：读一律“未加载”，
+    任何写操作直接失败，所以意外触碰驱动的测试仍然会被抓到。
+    """
+    from gamepadstudio import hidhide
+
+    class FakeSession:
+        def __init__(self, *args, **kwargs):
+            self._handle = None
+            self.occupied = False
+            self.holders = ()
+            self.error = '测试环境不提供 HidHide 驱动'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def open(self):
+            return False
+
+        def close(self):
+            pass
+
+        def read(self):
+            return hidhide.HidHideState(loaded=False, error=self.error)
+
+        def apply(self, change):
+            raise AssertionError('tests must not write the HidHide configuration')
+
+    monkeypatch.setattr(hidhide, 'HidHideSession', FakeSession)
+    monkeypatch.setattr(hidhide, 'running_hidhide_clients', lambda: [])
+
+
+@pytest.fixture(autouse=True)
 def isolate_workspace_output(monkeypatch):
     """UI regression tests must never send synthetic events to the desktop."""
     from gamepadstudio.i18n import set_language

@@ -485,6 +485,26 @@ class Studio(GlassWindow):
         self.touch_action_btn.setMinimumHeight(36)
         self.row_touchpad = AppleRow('touchpad', BADGE_COLOR, tr('触摸板'), tr('设置鼠标与手势动作'), self.touch_action_btn)
         right_panel.add_row(self.row_touchpad)
+
+        hidhide_box = QWidget()
+        hb = QHBoxLayout(hidhide_box)
+        hb.setContentsMargins(0, 0, 0, 0)
+        hb.setSpacing(8)
+        self.hidhide_toggle = Toggle(tr('启用'), show_label=False)
+        self.hidhide_toggle.setMinimumHeight(30)
+        self.hidhide_toggle.setToolTip(tr('开启后，未登记在应用程序列表里的程序看不到被隐藏的物理手柄'))
+        self.hidhide_toggle.toggled.connect(self.on_hidhide_master)
+        self.hidhide_config_btn = button(tr('配置'), self.open_hidhide_panel, pill=True)
+        self.hidhide_config_btn.setMinimumWidth(64)
+        self.hidhide_config_btn.setMinimumHeight(36)
+        hb.addWidget(self.hidhide_toggle)
+        hb.addWidget(self.hidhide_config_btn)
+        self.row_hidhide = AppleRow('shield', BADGE_COLOR, tr('设备隐身'),
+                                    tr('检测中…'), hidhide_box)
+        self.row_hidhide.setToolTip(tr('基于 HidHide 驱动，向游戏隐藏物理手柄，消除双重输入'))
+        right_panel.add_row(self.row_hidhide)
+        QTimer.singleShot(1200, self.refresh_hidhide_row)
+
         right_panel.vbox.addStretch()
         telemetry = QVBoxLayout()
         telemetry.setContentsMargins(14, 12, 14, 12)
@@ -2046,6 +2066,89 @@ class Studio(GlassWindow):
         if divider is not None:
             divider.setVisible(visible)
 
+    # ── 设备隐身 (HidHide)：界面不直接碰驱动，写操作统一交给后台 ──────────
+    def hidhide_controller(self):
+        if not hasattr(self, '_hidhide_controller'):
+            from .hidhide_control import HidHideController
+            self._hidhide_controller = HidHideController(self.store)
+        return self._hidhide_controller
+
+    def hidhide(self, action, **payload):
+        if self.remote:
+            if not (self.client and self.client.connected):
+                return {'ok': False, 'message': tr('后台未连接，无法读取或修改设备隐身配置。')}
+            reply = request(self.store.root, 'hidhide', action=action, payload=payload, timeout=30000)
+            if not isinstance(reply, dict):
+                return {'ok': False, 'message': tr('后台没有响应设备隐身请求。')}
+            return reply
+        return self.hidhide_controller().dispatch(action, payload)
+
+    def hidhide_row_text(self, data):
+        """概览行只放短状态；长解释留在 tooltip 和配置面板里。"""
+        info = data.get('info') or {}
+        state = data.get('state') or {}
+        if not info.get('installed'):
+            return tr('未安装驱动'), tr('打开配置查看安装说明')
+        if not state.get('loaded'):
+            return tr('驱动未运行'), tr('重启系统，或在服务中启动 HidHide 后重试')
+        if state.get('occupied'):
+            holders = state.get('holders') or []
+            tip = (state.get('error') or tr('关闭 HidHide 配置界面等程序后点刷新'))
+            return tr('配置被占用'), (tip + (f'\n{tr("疑似占用：")}' + '、'.join(holders) if holders else ''))
+        hidden = len(state.get('blacklist') or [])
+        if state.get('active'):
+            return tr('已开启 · %d 个节点') % hidden, tr('未登记的程序看不到这些设备')
+        if hidden:
+            return tr('未开启 · %d 个节点') % hidden, tr('打开总开关后才会生效')
+        return tr('未开启'), tr('在配置页勾选要隐藏的手柄')
+
+    def refresh_hidhide_row(self):
+        if getattr(self, '_hidhide_loading', False):
+            return
+        self._hidhide_loading = True
+        try:
+            data = self.hidhide('summary')
+            state = data.get('state') or {}
+            subtitle, tip = self.hidhide_row_text(data)
+            check = data.get('reconcile') or {}
+            if check.get('status') == 'access_missing':
+                tip = check.get('message') or tip
+                if not getattr(self, '_hidhide_access_warned', False):
+                    self._hidhide_access_warned = True
+                    self.notify(check.get('message') or '')
+            elif check.get('status') == 'ready':
+                self._hidhide_access_warned = False
+            self.hidhide_toggle.blockSignals(True)
+            self.hidhide_toggle.setChecked(bool(state.get('active')))
+            self.hidhide_toggle.setEnabled(bool(state.get('loaded')) and not state.get('occupied'))
+            self.hidhide_toggle.blockSignals(False)
+            if self.row_hidhide.subtitle_label is not None:
+                self.row_hidhide.subtitle_label.setText(subtitle)
+            self.row_hidhide.setToolTip(tip)
+            self.hidhide_config_btn.setToolTip(tip)
+        finally:
+            self._hidhide_loading = False
+
+    def on_hidhide_master(self, checked):
+        if getattr(self, '_hidhide_loading', False):
+            return
+        self._hidhide_loading = True
+        try:
+            result = self.hidhide('set_enabled', enabled=bool(checked))
+        finally:
+            self._hidhide_loading = False
+        message = (result or {}).get('message')
+        if message:
+            self.notify(message)
+        self.refresh_hidhide_row()
+
+    def open_hidhide_panel(self):
+        from .hidhide_ui import HidHidePanel
+        dialog = HidHidePanel(self)
+        dialog.exec()
+        dialog.deleteLater()
+        self.refresh_hidhide_row()
+
     def refresh_device_settings_ui(self, state):
         settings = device_config(self.config, state)
         capabilities = curve_capabilities(state)
@@ -2070,6 +2173,10 @@ class Studio(GlassWindow):
             self._show_device_row(row, supported)
             row.control.setEnabled(supported)
         is_connected = bool(state and state.get('connected') is not False and state.get('name'))
+        if is_connected != getattr(self, '_hidhide_connected', None):
+            # 设备隐身是手动功能，只在连接状态真正变化时读一次驱动状态。
+            self._hidhide_connected = is_connected
+            QTimer.singleShot(500, self.refresh_hidhide_row)
         show_trigger_hint = is_connected and not bool(capabilities['trigger_axes'])
         if hasattr(self, 'trigger_mode_hint'):
             self._show_device_row(self.trigger_mode_hint, show_trigger_hint)
@@ -3261,21 +3368,9 @@ class Studio(GlassWindow):
         return True
 
     def _restore_device_access(self):
-        if sys.platform == 'win32' and getattr(self, '_cloaked_devices', None):
+        if sys.platform == 'win32' and not (self.remote and self.client and self.client.connected):
             try:
-                from .hidhide import HidHideClient
-                client = HidHideClient()
-                if client.is_driver_installed():
-                    if not self.remote or not (self.client and self.client.connected):
-                        for vendor, product, dev_path in list(getattr(self, '_cloaked_devices', set())):
-                            opts = {'device_path': dev_path} if dev_path else {}
-                            client.uncloak_controller(vendor, product, **opts)
-                        self._cloaked_devices.clear()
-                        if hasattr(self, 'snapshot') and self.snapshot and self.snapshot.get('vendor') and self.snapshot.get('product'):
-                            opts = {'device_path': self.snapshot.get('device_path')} if self.snapshot.get('device_path') else {}
-                            client.uncloak_controller(self.snapshot['vendor'], self.snapshot['product'], **opts)
-                        if not client.get_blacklist():
-                            client.set_active(False)
+                self.hidhide_controller().reconcile_on_exit()
             except Exception:
                 pass
         self.device.close()

@@ -181,7 +181,8 @@ def mac_environment(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_module, 'emergency_hotkey_supported', lambda: True)
     monkeypatch.setattr(agent_module, 'input_permission_status', lambda: {'supported': True, 'granted': False})
     monkeypatch.setattr(agent_module, 'create_actions', lambda: pytest.fail('Unexpected native output'))
-    monkeypatch.setattr('gamepadstudio.hidhide.HidHideClient', lambda: pytest.fail('Unexpected Windows driver call'))
+    monkeypatch.setattr('gamepadstudio.hidhide.HidHideSession',
+                        lambda *a, **k: pytest.fail('Unexpected Windows driver call'))
     FakeRecording.instances = []
     monkeypatch.setattr(FakeRecording, 'start_ok', True)
     monkeypatch.setattr(agent_module, 'ManualRecording', FakeRecording)
@@ -669,19 +670,19 @@ def test_agent_stop_commands_reach_full_recording_finalization_through_app_quit(
     assert env.actor.closed and env.physical.handle is None and env.actor.server.closed
 
 
-def test_windows_agent_cloaking_still_uses_hidhide_and_preserves_mac_opt_in(mac_environment, monkeypatch):
+def test_windows_agent_cloaking_is_manual_only_and_mac_opt_in_is_preserved(mac_environment, monkeypatch):
+    """Windows：设备隐身改成手动，后台不得再自己读写驱动；macOS 的隔离开关不受影响。"""
     env = mac_environment.make_agent()
     monkeypatch.setattr(agent_module, 'sys', SimpleNamespace(platform='win32'))
-    calls = []
-    hid = SimpleNamespace(is_driver_installed=lambda: True,
-        cloak_controller=lambda vendor, product, **kwargs: (calls.append((True, vendor, product, kwargs)) or (True, 'cloaked')),
-        uncloak_controller=lambda vendor, product, **kwargs: (calls.append((False, vendor, product, kwargs)) or (True, 'visible')))
-    monkeypatch.setattr('gamepadstudio.hidhide.HidHideClient', lambda: hid)
+    writes = []
+    monkeypatch.setattr('gamepadstudio.hidhide_control.HidHideController.set_paths_hidden',
+                        lambda self, paths, hidden: writes.append((tuple(paths), hidden)))
+    monkeypatch.setattr('gamepadstudio.hidhide.HidHideSession',
+                        lambda *a, **k: pytest.fail('Windows agent must not open the driver on its own'))
     env.actor.state['device_path'] = 'fake-windows-device-path'
     env.actor.apply_device_cloaking()
     env.actor.store.set_setting('device_cloaking_enabled', False, env.actor.state)
     env.actor.apply_device_cloaking()
-    assert [row[0] for row in calls] == [True, False]
-    assert all(row[1:3] == (0x054c, 0x0ce6) and row[3] == {'device_path': 'fake-windows-device-path'} for row in calls)
+    assert writes == []
     assert env.physical.native.calls == []
     assert not isolation_requested(env.actor.config, env.actor.state)

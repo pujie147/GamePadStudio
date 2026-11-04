@@ -24,12 +24,12 @@ def run():
     parser.add_argument('--uncloak-all',action='store_true')
     args,_=parser.parse_known_args()
     if args.uncloak_all:
-        from .hidhide import HidHideClient
-        client = HidHideClient()
-        ok, msg = client.uncloak_all_controllers()
+        from .hidhide_control import HidHideController
+        result = HidHideController().reveal_all()
         if sys.stdout:
-            print(json.dumps({'ok': ok, 'message': msg}, ensure_ascii=False))
-        return 0 if ok else 1
+            print(json.dumps({'ok': bool(result.get('ok')),
+                              'message': result.get('message', '')}, ensure_ascii=False))
+        return 0 if result.get('ok') else 1
     if args.agent or args.agent_command or args.exit_ui:
         from .ipc import default_root,request
         from PySide6.QtCore import QCoreApplication

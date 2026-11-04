@@ -119,33 +119,15 @@ class Agent(QObject):
             return
         if sys.platform != 'win32':
             return
-        settings = device_config(self.config, self.state)
-        if not self.state:
-            return
-        vendor = self.state.get('vendor')
-        product = self.state.get('product')
-        if not vendor:
-            return
-        try:
-            from .hidhide import HidHideClient
-            client = HidHideClient()
-            if client.is_driver_installed():
-                enabled = settings.get('device_cloaking_enabled', True)
-                options = {'device_path': self.state['device_path']} if self.state.get('device_path') else {}
-                key = (vendor, product, options.get('device_path'))
-                ok, msg = client.cloak_controller(vendor, product, **options) if enabled else client.uncloak_controller(vendor, product, **options)
-                if not hasattr(self, '_cloaked_devices'):
-                    self._cloaked_devices = set()
-                if ok:
-                    if enabled:
-                        self._cloaked_devices.add(key)
-                    else:
-                        self._cloaked_devices.discard(key)
-                    self.log(f'硬件独占隐身已就绪：{msg}' if enabled else f'手柄原始输入已恢复：{msg}')
-                else:
-                    self.log(f'硬件独占隐身未生效：{msg}')
-        except Exception as exc:
-            self.log(f'硬件独占隐身配置异常：{exc}')
+        # Windows 的设备隐身是手动功能：不再在连接/切换手柄时自动改驱动配置，
+        # 避免后台与 HidHide 配置界面互相抢独占句柄。见 hidhide_control.py。
+        return
+
+    def hidhide_controller(self):
+        if not hasattr(self, '_hidhide_controller'):
+            from .hidhide_control import HidHideController
+            self._hidhide_controller = HidHideController(self.store)
+        return self._hidhide_controller
 
     def apply_device_settings(self):
         """Apply settings for the selected input device, including reconnects."""
@@ -506,6 +488,8 @@ class Agent(QObject):
                     self.replay_engine.start()
             self.apply_device_settings()
             self.update_application_profile(force=True)
+        elif command=='hidhide':
+            return self.hidhide_controller().dispatch(message.get('action'), message.get('payload') or {})
         elif command=='set_device_cloaking':
             if sys.platform == 'darwin':
                 from .controller_isolation_service import set_controller_isolation
@@ -514,31 +498,11 @@ class Agent(QObject):
                 self._isolation_apply_pending = False
                 self.log(result['message']); self.broadcast()
                 return result
-            if not self.state or not self.state.get('vendor'):
-                raise ValueError('请先连接支持设备隐身的手柄')
-            enabled = bool(message.get('enabled', True))
-            self.store.set_setting('device_cloaking_enabled', enabled, self.state)
-            self.store.save()
-            applied = False
-            msg = '未连接手柄或无需隐身'
-            if self.state:
-                from .hidhide import HidHideClient
-                client = HidHideClient()
-                if client.is_driver_installed():
-                    vendor = self.state.get('vendor')
-                    product = self.state.get('product')
-                    options = {'device_path': self.state['device_path']} if self.state.get('device_path') else {}
-                    key = (vendor, product, options.get('device_path'))
-                    applied, msg = client.cloak_controller(vendor, product, **options) if enabled else client.uncloak_controller(vendor, product, **options)
-                    if not hasattr(self, '_cloaked_devices'):
-                        self._cloaked_devices = set()
-                    if applied:
-                        if enabled:
-                            self._cloaked_devices.add(key)
-                        else:
-                            self._cloaked_devices.discard(key)
-                    self.log(msg)
-            return {'applied': applied, 'message': msg, 'enabled': enabled}
+            result = self.hidhide_controller().set_enabled(bool(message.get('enabled', True)))
+            if result.get('message'):
+                self.log(result['message'])
+            return {'applied': bool(result.get('ok')), 'message': result.get('message', ''),
+                    'enabled': bool(message.get('enabled', True))}
         elif command=='set_gamebar_shield':
             from .gamebar_shield import set_gamebar_shield
             if type(message.get('enabled')) is not bool:
@@ -753,19 +717,9 @@ class Agent(QObject):
     def _restore_device_access(self):
         if sys.platform == 'win32':
             try:
-                from .hidhide import HidHideClient
-                client = HidHideClient()
-                if client.is_driver_installed():
-                    for vendor, product, dev_path in list(getattr(self, '_cloaked_devices', set())):
-                        opts = {'device_path': dev_path} if dev_path else {}
-                        client.uncloak_controller(vendor, product, **opts)
-                    if hasattr(self, '_cloaked_devices'):
-                        self._cloaked_devices.clear()
-                    if self.state and self.state.get('vendor') and self.state.get('product'):
-                        opts = {'device_path': self.state['device_path']} if self.state.get('device_path') else {}
-                        client.uncloak_controller(self.state['vendor'], self.state['product'], **opts)
-                    if not client.get_blacklist():
-                        client.set_active(False)
+                result = self.hidhide_controller().reconcile_on_exit()
+                if not result.get('ok') and result.get('message'):
+                    self.log(f'恢复手柄共享访问失败：{result["message"]}')
             except Exception as exc:
                 self.log(f'恢复手柄访问失败：{exc}')
         self.device.close()

@@ -24,7 +24,7 @@ from gamepadstudio.device_quirks import (
     parse_usb_ids,
     partition_dinput_buttons_by_sdl_db,
 )
-from gamepadstudio.hidhide import hidhide_usage_guidance
+from gamepadstudio.hidhide import install_driver, is_apple_bootcamp_environment
 from gamepadstudio.mapping_engine import (
     INPUTS,
     MappingRuntime,
@@ -355,14 +355,12 @@ class TestArchitectureAndNewFeatures(unittest.TestCase):
         self.assertEqual(button_labels('stadia')[15], 'Capture')
         self.assertEqual(capture_button('stadia', range(16)), 15)
 
-    def test_hidhide_usage_guidance_and_bootcamp_warning(self):
-        normal_guide = hidhide_usage_guidance(bootcamp=False)
-        self.assertIn('非必装', normal_guide)
-        self.assertIn('重新拔插', normal_guide)
-        self.assertIn('Bootcamp', normal_guide)
-
-        bootcamp_guide = hidhide_usage_guidance(bootcamp=True)
-        self.assertIn('检测到 Apple Mac 双系统环境', bootcamp_guide)
+    def test_hidhide_install_refuses_apple_bootcamp(self):
+        """Boot Camp 上装 HidHide 会连带弄坏内置键盘/触控板，必须直接拒绝。"""
+        with patch('gamepadstudio.hidhide.is_apple_bootcamp_environment', return_value=True):
+            result = install_driver()
+        self.assertFalse(result.ok)
+        self.assertIn('Boot Camp', result.message)
 
     def test_quick_scene_templates_in_virtual_kbm_page(self):
         import tempfile

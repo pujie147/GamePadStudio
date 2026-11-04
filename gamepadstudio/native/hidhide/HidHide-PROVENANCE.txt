@@ -1,0 +1,19 @@
+HidHide setup package - provenance
+===================================
+File          : HidHide_1.5.230_x64.exe
+Version       : 1.5.230.0 (driver payload 1.4.181.0)
+Origin        : https://github.com/nefarius/HidHide/releases/tag/v1.5.230.0
+Asset         : https://github.com/nefarius/HidHide/releases/download/v1.5.230.0/HidHide_1.5.230_x64.exe
+SHA-256       : f4bbbcb82e6258641b887c74bc81c4c5f66e4aa811808dfc304347687b7605f6
+Publisher     : Nefarius Software Solutions e.U. (Authenticode signed)
+License       : MIT, see HidHide-LICENSE.txt (bundled next to this file under licenses/)
+Size (bytes)  : 8078016
+Why bundled   : GamePad Studio installs the filter driver on demand with one click
+                (setup /quiet, elevated) so users never have to find or run HidHide
+                themselves. We ship the unmodified upstream package and verify the
+                hash before launching it.
+Notes         : Installing or updating the driver requires administrator rights and
+                usually a reboot; that prompt is unavoidable for a kernel driver and
+                happens once. HidHide configuration itself needs no elevation.
+                Apple Boot Camp machines are refused: HidHide conflicts with the
+                composite built-in keyboard/trackpad driver there.

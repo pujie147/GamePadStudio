@@ -1412,3 +1412,178 @@ def tr_profile(name: str) -> str:
             return '3D Action Preset'
         return TRANSLATIONS.get(name, name)
     return name
+
+
+TRANSLATIONS.update({
+    # 设备隐身 (HidHide) 面板与状态文案
+    '设备隐身': 'Device Cloaking',
+    '设备隐身 (HidHide)': 'Device Cloaking (HidHide)',
+    '刷新': 'Refresh',
+    '打开 HidHide 配置界面': 'Open HidHide Settings',
+    '获取驱动': 'Get Driver',
+    '向其他应用隐藏已勾选的设备': 'Hide the ticked devices from other applications',
+    '隐藏当前手柄': 'Hide Current Controller',
+    '应用程序': 'Applications',
+    '设备': 'Devices',
+    '驱动与状态': 'Driver & Status',
+    '连接': 'Connection',
+    '已就绪': 'Ready',
+    '驱动未运行': 'Driver not running',
+    '未安装': 'Not installed',
+    '已安装': 'Installed',
+    '驱动': 'Driver',
+    '未检测到驱动': 'No driver detected',
+    '添加程序': 'Add Application',
+    '移除所选': 'Remove Selected',
+    '只显示游戏设备': 'Gaming devices only',
+    '隐藏已断开设备': 'Hide disconnected devices',
+    '已断开': 'Disconnected',
+    '本程序': 'This app',
+    '本程序添加': 'Added by this app',
+    '外部程序': 'Other software',
+    '（文件不存在）': ' (file missing)',
+    '安装状态': 'Installation',
+    '驱动可访问': 'Driver reachable',
+    '安装包版本': 'Package version',
+    '驱动文件版本': 'Driver file version',
+    '安装目录': 'Install folder',
+    '守护服务': 'Watchdog service',
+    '过滤驱动服务': 'Filter driver service',
+    '总开关': 'Master switch',
+    '已开启': 'On',
+    '未开启': 'Off',
+    '反向模式': 'Inverse mode',
+    '开启（列表含义反转）': 'On (the list means denied)',
+    '已登记程序': 'Registered apps',
+    '已隐藏节点': 'Hidden nodes',
+    '本程序添加的节点': 'Nodes added by this app',
+    '是': 'Yes',
+    '否': 'No',
+    '检测中…': 'Checking…',
+    '配置 ›': 'Settings ›',
+    '一键恢复所有共享访问': 'Restore shared access for all devices',
+    '列表中的程序仍能看到被隐藏的手柄。本程序会自动登记自身，否则开启隐身后我们自己就读不到手柄了。':
+        'Apps on this list can still see the hidden controller. This app registers itself automatically, otherwise it would lose access too.',
+    '勾选整行会隐藏该物理设备的整套 HID 节点（含 XInput 通道）。':
+        'Ticking a row hides every HID node of that physical device, including its XInput path.',
+    '无法读取（可能被其他程序独占或本程序未被授权）':
+        'Not readable (held exclusively by another app, or this app is not allowed)',
+    '没有符合条件的设备。连接手柄后点「刷新」，或取消筛选查看已断开设备。':
+        'No matching devices. Connect a controller and press Refresh, or clear the filters to see disconnected ones.',
+    '列表为空。本程序会在需要时自动登记自身；这里添加的程序仍能看到被隐藏的手柄。':
+        'Empty list. This app registers itself when needed. Apps added here keep seeing the hidden controller.',
+    '请选中一条由本程序或你手动添加的条目。': 'Select an entry added by this app or by you.',
+    '移除后该程序将无法访问被隐藏的手柄，确定吗？':
+        'That app will lose access to the hidden controller. Continue?',
+    '确认移除': 'Confirm removal',
+    '选择要允许访问手柄的程序': 'Choose an app allowed to see the controller',
+    '可执行程序 (*.exe);;所有文件 (*)': 'Executable (*.exe);;All files (*)',
+    '未安装 HidHide 驱动。点击「获取驱动」下载安装后重启本程序。':
+        'HidHide is not installed. Use Get Driver, install it, then restart this app.',
+    '驱动已安装但未运行。重启系统，或在服务中启动 HidHide 后点「刷新」。':
+        'The driver is installed but not running. Reboot, or start the HidHide service and press Refresh.',
+    '设备隐身配置正被其他程序占用，本面板只读。':
+        'Another application holds the cloaking configuration, so this panel is read-only.',
+    '疑似占用：': 'Likely holder: ',
+    'HidHide 处于反向白名单模式：列表里的程序是被禁止访问的，本程序不会被登记。':
+        'HidHide is in inverse whitelist mode: listed apps are denied, so this app is not registered.',
+    '当前无法修改驱动配置，原因见上方提示。':
+        'The driver configuration cannot be changed right now; see the notice above.',
+    '总开关已开启：未登记在应用程序列表里的程序，看不到已勾选隐藏的设备。':
+        'Master switch on: apps that are not listed cannot see the ticked devices.',
+    '总开关未开启：即使已勾选设备，其他程序仍能访问。':
+        'Master switch off: other apps can still reach the devices even when ticked.',
+    '已清空隐藏列表并关闭总开关。': 'Hidden list cleared and the master switch turned off.',
+    '已打开 HidHide 配置界面。它会独占驱动配置，本面板随后转为只读，关闭它再点「刷新」即可恢复。':
+        'HidHide Settings is open and owns the configuration. This panel turns read-only; close it and press Refresh.',
+    '无法访问设备隐身服务：': 'Cannot reach the cloaking service: ',
+    '后台未连接，无法读取或修改设备隐身配置。':
+        'The background service is not connected, so cloaking cannot be read or changed.',
+    '后台没有响应设备隐身请求。': 'The background service did not answer the cloaking request.',
+    '开启后，未登记在应用程序列表里的程序看不到被隐藏的物理手柄':
+        'When on, apps that are not listed cannot see the hidden physical controller',
+    '基于 HidHide 驱动，向游戏隐藏物理手柄，消除双重输入':
+        'Hides the physical controller from games through the HidHide driver, ending double input',
+    '未安装 HidHide 驱动': 'HidHide driver not installed',
+    '打开配置查看安装说明': 'Open Settings for install instructions',
+    '重启系统，或在服务中启动 HidHide 后重试': 'Reboot, or start the HidHide service and try again',
+    '配置被占用：': 'Configuration held by: ',
+    '配置正被其他程序占用': 'Configuration is held by another app',
+    '关闭 HidHide 配置界面等程序后点刷新': 'Close HidHide Settings and similar apps, then press Refresh',
+    '已开启 · 已隐藏 %d 个设备节点': 'On · %d device nodes hidden',
+    '未登记的程序看不到这些设备': 'Apps that are not listed cannot see these devices',
+    '未开启 · 已勾选 %d 个设备节点': 'Off · %d device nodes ticked',
+    '打开总开关后才会生效': 'Turn on the master switch to take effect',
+    '未开启 · 未勾选设备': 'Off · no devices ticked',
+    '在配置页勾选要隐藏的手柄': 'Tick the controller to hide on the Settings page',
+    '设备隐身配置正被其他程序占用，无法读取或修改。关闭 HidHide 配置界面等程序后点「刷新」。':
+        'Another application is using the cloaking configuration, so it cannot be read or changed. Close HidHide Settings and similar apps, then press Refresh.',
+    '未检测到运行中的设备隐身驱动。': 'No running cloaking driver was detected.',
+    '无法读取设备隐身配置': 'Cannot read the cloaking configuration',
+    '无法打开设备隐身驱动。': 'Cannot open the cloaking driver.',
+    'HidHide 仅支持 Windows': 'HidHide supports Windows only',
+    '写入失败：': 'Write failed: ',
+    '写入后无法确认结果：': 'Could not verify the result after writing: ',
+    '写入后校验不一致：应用列表未生效': 'Verification failed: the application list did not apply',
+    '写入后校验不一致：隐藏设备列表未生效': 'Verification failed: the hidden device list did not apply',
+    '写入后校验不一致：总开关未生效': 'Verification failed: the master switch did not apply',
+    '未选择要移除的程序。': 'No application selected for removal.',
+    '没有可添加的程序。': 'Nothing to add.',
+    '本程序自身必须保留访问权限，否则开启隐身后会读不到手柄。':
+        'This app must keep access, otherwise it loses the controller once cloaking is on.',
+    '未选择设备。': 'No device selected.',
+    '无法确定本程序的运行路径，开启后我们会读不到手柄，因此拒绝开启。':
+        'This app cannot determine its own executable path, so turning cloaking on would lock us out.',
+    '设备已断开或列表已过期，请点「刷新」后重试。':
+        'The device is gone or the list is stale. Press Refresh and try again.',
+    '当前手柄没有可隐藏的 HID 节点。': 'This controller has no HID node to hide.',
+    '无法唯一匹配当前手柄的 HID 节点，请重新连接或手动在设备列表中选择。':
+        'The controller HID node is ambiguous. Reconnect it, or pick it in the device list.',
+    '未找到 HidHide 配置界面，请先安装 HidHide 驱动。':
+        'HidHide Settings not found. Install the HidHide driver first.',
+    '未知的设备隐身操作：': 'Unknown cloaking action: ',
+    '已恢复所有共享访问': 'Shared access restored for all devices',
+})
+
+
+TRANSLATIONS.update({
+    '未安装驱动': 'Driver not installed',
+    '配置被占用': 'Config held by another app',
+    '已开启 · %d 个节点': 'On · %d nodes',
+    '未开启 · %d 个节点': 'Off · %d nodes',
+    '未开启': 'Off',
+    '配置': 'Settings',
+})
+
+
+TRANSLATIONS.update({
+    '鼠标': 'Mouse',
+    '摇杆': 'Joystick',
+    '游戏手柄': 'Game pad',
+    '键盘': 'Keyboard',
+    '多媒体控制': 'Consumer control',
+    '游戏控制器': 'Game controller',
+    '条形码扫描': 'Barcode scanner',
+    '音频控制': 'Audio control',
+    '集合': 'Collection',
+    '本程序 · 待登记': 'This app · to register',
+})
+
+
+TRANSLATIONS.update({
+    '一键安装驱动': 'Install Driver',
+    '修复：启动驱动': 'Repair: Start Driver',
+    '官方发布页': 'Official Releases',
+    '打开下载页': 'Open Download Page',
+    '确认': 'Confirm',
+    '修复需要管理员权限，用于启动已安装但未运行的驱动服务。':
+        'Repair needs administrator rights to start the installed but stopped driver service.',
+    '安装需要管理员权限，安装完成后通常需要重启系统。这是内核驱动唯一一次提权，之后的配置不再需要管理员。':
+        'Installing needs administrator rights and usually a reboot. This is the only elevation a kernel driver requires; later configuration stays unprivileged.',
+    '驱动已安装，请重启系统后再使用设备隐身。':
+        'Driver installed. Reboot before using device cloaking.',
+    '未安装 HidHide 驱动。可一键安装，或先到官方发布页下载安装。':
+        'HidHide is not installed. Install it with one click, or download it from the official releases page.',
+    '驱动已安装但未运行。可尝试修复启动服务，或重启系统。':
+        'The driver is installed but not running. Try Repair, or reboot the system.',
+})

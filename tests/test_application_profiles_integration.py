@@ -33,7 +33,6 @@ def remote_workspace(tmp_path, monkeypatch):
 
     monkeypatch.setattr('gamepadstudio.application_profiles.foreground_application', lambda: dict(foreground))
     monkeypatch.setattr('gamepadstudio.agent.foreground_application', lambda: dict(foreground))
-    monkeypatch.setattr('gamepadstudio.hidhide.HidHideClient.is_driver_installed', lambda self: False)
     backend_actions, ui_actions = Actions(), Actions()
     agent = Agent(tmp_path, Device(), backend_actions)
     agent.timer.stop(); agent.scan_timer.stop(); agent.broadcast_timer.stop()

@@ -169,8 +169,8 @@ class Device:
         # Active HidHide filtering must allow this executable before SDL creates
         # its first device list, including a newly built packaged application.
         if sys.platform == 'win32':
-            from .hidhide import ensure_current_app_input_access
-            access_ok, access_message = ensure_current_app_input_access()
+            from .hidhide import ensure_self_access
+            access_ok, access_message = ensure_self_access()
             if not access_ok:
                 self.access_warning = access_message
                 self.error = access_message

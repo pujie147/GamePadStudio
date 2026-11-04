@@ -38,7 +38,6 @@ def workspace(tmp_path, monkeypatch):
         def close(self): pass
         def led(self, color): return True
     monkeypatch.setattr('gamepadstudio.studio.Device', Disconnected)
-    monkeypatch.setattr('gamepadstudio.hidhide.HidHideClient.is_driver_installed', lambda self: False)
     app = QApplication.instance() or QApplication([])
     previous = get_language_preference()
     window = Studio(tmp_path, standalone=True, lang='zh')

@@ -458,10 +458,13 @@ def test_hidhide_mac_paths_do_not_touch_registry_or_driver(monkeypatch):
     monkeypatch.setattr(hidhide, 'sys', SimpleNamespace(platform='darwin'))
     monkeypatch.setattr(hidhide, 'winreg', SimpleNamespace(
         OpenKey=lambda *args: pytest.fail('Unexpected Windows registry access')))
-    client = hidhide.HidHideClient()
-    monkeypatch.setattr(client, '_send_ioctl', lambda *args, **kwargs: pytest.fail('Unexpected Windows driver access'))
-    assert hidhide.find_hid_instances(0x054C, 0x0CE6) == []
-    assert hidhide.ensure_current_app_input_access(client) == (True, '')
-    assert not client.is_driver_installed()
-    assert client.cloak_controller(0x054C, 0x0CE6)[0] is False
-    assert client.uncloak_controller(0x054C, 0x0CE6)[0] is False
+    # macOS 上每个入口都要在碰设备之前就返回；构造会话会被 conftest 硬闸拦下，
+    # 所以这里只断言那些“提前返回”的路径确实提前返回。
+    assert hidhide.self_app_paths() == []
+    assert hidhide.ensure_self_access() == (True, '')
+    assert hidhide.running_hidhide_clients() == []
+    assert hidhide.dos_to_nt_path(r'C:\a\b.exe') == r'C:\a\b.exe'
+    info = hidhide.driver_info()
+    assert info.installed is False and info.loaded is False
+    assert 'Windows' in info.error
+    assert hidhide.install_driver().ok is False

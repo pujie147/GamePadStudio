@@ -131,8 +131,6 @@ def hotkey_workspace(tmp_path, monkeypatch, hotkey_app, request):
     monkeypatch.setattr('gamepadstudio.studio.request', lambda *args, **kwargs: {'ok': True})
     monkeypatch.setattr('gamepadstudio.studio.spawn',
                         lambda *args, **kwargs: pytest.fail('Unexpected backend process spawn'))
-    monkeypatch.setattr('gamepadstudio.hidhide.HidHideClient.is_driver_installed',
-                        lambda self: False)
     monkeypatch.setattr('gamepadstudio.application_profiles.foreground_application',
                         lambda: {'hwnd': 0, 'pid': 0, 'executable': ''})
     window = Studio(tmp_path, standalone=not remote, lang=options.get('lang', 'zh'))

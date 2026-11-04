@@ -215,17 +215,43 @@ def scoped_state(key, instance=1, **capabilities):
                 touchpad=capabilities.get('touchpad', True))
 
 
-def test_startup_without_selected_device_never_cloaks_hardware(tmp_path, monkeypatch):
+def test_startup_never_touches_hidhide_configuration(tmp_path, monkeypatch):
+    """设备隐身改为手动：后台启动与轮询不得读写驱动配置。"""
     app = QApplication.instance() or QApplication([])
     calls = []
-    monkeypatch.setattr('gamepadstudio.hidhide.HidHideClient', lambda: calls.append(True))
+    monkeypatch.setattr('gamepadstudio.hidhide_control.HidHideController.dispatch',
+                        lambda self, action, payload=None: calls.append((action, payload)))
     agent = Agent(tmp_path, ScopedDeviceStub(), ActionsStub())
     try:
         agent.poll()
-        assert not calls and not agent.haptic_engine.haptics_enabled
-        with pytest.raises(ValueError, match='请先连接'):
-            agent.handle({'command': 'set_device_cloaking', 'enabled': True})
-        assert not calls
+        agent.handle({'command': 'reload'})
+        agent.poll()
+        assert calls == []
+        assert not agent.haptic_engine.haptics_enabled
+    finally:
+        agent.close()
+
+
+def test_hidhide_command_is_the_only_write_route(tmp_path, monkeypatch):
+    """界面经 `hidhide` 命令进入控制层；控制层是唯一写驱动的地方。"""
+    from types import SimpleNamespace
+    app = QApplication.instance() or QApplication([])
+    calls = []
+    monkeypatch.setattr('gamepadstudio.hidhide_control.HidHideController.dispatch',
+                        lambda self, action, payload=None: {
+                            'ok': True, 'routed': action, 'payload': payload,
+                            'message': '', 'occupied': False, 'holders': [], 'state': None})
+    monkeypatch.setattr('gamepadstudio.hidhide_control.HidHideController.set_enabled',
+                        lambda self, enabled: (calls.append(('set_enabled', enabled)) or
+                                               {'ok': True, 'message': '', 'occupied': False,
+                                                'holders': [], 'state': None}))
+    agent = Agent(tmp_path, ScopedDeviceStub(scoped_state('pad:first')), ActionsStub())
+    try:
+        reply = agent.handle({'command': 'hidhide', 'action': 'set_group_hidden',
+                              'payload': {'key': 'HID\\X', 'hidden': True}})
+        assert reply['routed'] == 'set_group_hidden' and reply['payload']['key'] == 'HID\\X'
+        legacy = agent.handle({'command': 'set_device_cloaking', 'enabled': True})
+        assert legacy['applied'] is True and calls == [('set_enabled', True)]
     finally:
         agent.close()
 
@@ -298,77 +324,45 @@ def test_hardware_commands_respect_reported_capabilities_and_device_scope(tmp_pa
         agent.close()
 
 
-def test_device_cloaking_preference_only_changes_selected_controller(tmp_path, monkeypatch):
-    from gamepadstudio.studio_core import ConfigStore, profile_scope
+def test_exit_reconciles_only_the_paths_this_program_hidden(tmp_path, monkeypatch):
+    """退出时只解除本程序登记的隐藏，其他工具写进 HidHide 的条目必须原样保留。"""
+    from types import SimpleNamespace
     app = QApplication.instance() or QApplication([])
-    monkeypatch.setattr(Agent, 'apply_device_cloaking', lambda self: None)
+    monkeypatch.setattr('gamepadstudio.agent.sys', SimpleNamespace(platform='win32'))
     calls = []
+    closed = []
 
-    class CloakingStub:
-        def is_driver_installed(self):
-            return True
+    class Device:
+        def close(self):
+            closed.append(True)
 
-        def uncloak_controller(self, vendor, product):
-            calls.append((vendor, product))
-            return True, 'selected device restored'
-
-    monkeypatch.setattr('gamepadstudio.hidhide.HidHideClient', CloakingStub)
-    first, second = scoped_state('pad:first'), scoped_state('pad:second', 2)
-    store = ConfigStore(tmp_path)
-    store.set_setting('device_cloaking_enabled', True, first)
-    store.set_setting('device_cloaking_enabled', True, second)
-    store.save()
-    agent = Agent(tmp_path, ScopedDeviceStub(first), ActionsStub())
-    try:
-        agent.poll()
-        # This regression exercises the Windows HidHide path on every host.
-        from types import SimpleNamespace
-        monkeypatch.setattr('gamepadstudio.agent.sys', SimpleNamespace(platform='win32'))
-        result = agent.handle({'command': 'set_device_cloaking', 'enabled': False,
-                               'device_scope': profile_scope(first)})
-        assert result['applied'] and calls == [(0x054c, 0x0ce6)]
-        latest = ConfigStore(tmp_path)
-        assert not latest.settings_for(first)['device_cloaking_enabled']
-        assert latest.settings_for(second)['device_cloaking_enabled']
-    finally:
-        agent.close()
+    agent = Agent(tmp_path, Device(), ActionsStub())
+    agent.hidhide_controller = lambda: SimpleNamespace(
+        reconcile_on_exit=lambda: calls.append('reconcile') or {'ok': True, 'message': ''})
+    # close() 内部会走 _restore_device_access，这里只调用一次 close。
+    agent.close()
+    assert calls == ['reconcile'] and closed == [True]
 
 
-def test_cloaking_commands_forward_selected_physical_path_and_never_guess(tmp_path, monkeypatch):
+def test_hide_current_never_guesses_between_two_identical_pads(tmp_path, monkeypatch):
+    """歧义设备必须拒绝写入，而不是在两台同型号手柄里猜一台。"""
     from types import SimpleNamespace
     from gamepadstudio import agent as agent_module
     app = QApplication.instance() or QApplication([])
-    calls = []
     monkeypatch.setattr(agent_module, 'sys', SimpleNamespace(platform='win32'))
-
-    class CloakingStub:
-        def is_driver_installed(self):
-            return True
-
-        def cloak_controller(self, vendor, product, **options):
-            calls.append(('cloak', vendor, product, options))
-            return False, 'multiple hardware candidates'
-
-        def uncloak_controller(self, vendor, product, **options):
-            calls.append(('uncloak', vendor, product, options))
-            return False, 'multiple hardware candidates'
-
-    monkeypatch.setattr('gamepadstudio.hidhide.HidHideClient', CloakingStub)
+    writes = []
+    monkeypatch.setattr('gamepadstudio.hidhide_control.HidHideController.set_paths_hidden',
+                        lambda self, paths, hidden: writes.append((tuple(paths), hidden)))
+    monkeypatch.setattr('gamepadstudio.hidhide_devices.group_for_device',
+                        lambda vendor, product, device_path='': None)
     state = {**scoped_state('pad:first'), 'device_path': r'\\?\HID#VID_054C&PID_0CE6#FIRST'}
-    device = ScopedDeviceStub(state)
-    agent = Agent(tmp_path, device, ActionsStub())
-    agent._user32 = SimpleNamespace(GetAsyncKeyState=lambda key: 0)
-    agent._last_prtsc_down = False
+    agent = Agent(tmp_path, ScopedDeviceStub(state), ActionsStub())
     try:
-        assert not calls
-        agent.poll()
-        assert calls == [('cloak', 0x054c, 0x0ce6, {'device_path': state['device_path']})]
-        result = agent.handle({'command': 'set_device_cloaking', 'enabled': False})
-        assert not result['applied'] and result['message'] == 'multiple hardware candidates'
-        assert calls[-1] == ('uncloak', 0x054c, 0x0ce6, {'device_path': state['device_path']})
-        device.state = None
-        agent.poll()
-        assert len(calls) == 2
+        reply = agent.handle({'command': 'hidhide', 'action': 'hide_current',
+                              'payload': {'vendor': state['vendor'], 'product': state['product'],
+                                          'device_path': state['device_path']}})
+        assert reply['ok'] is False and '唯一匹配' in reply['message']
+        assert writes == []
     finally:
         agent.close()
 

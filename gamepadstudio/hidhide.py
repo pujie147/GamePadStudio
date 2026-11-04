@@ -1,9 +1,11 @@
 """
-HidHide Windows Kernel Filter Driver Integration (硬件独占屏蔽与设备隐身服务)
-1. 基于微软 WHQL 官方认证的 HidHide.sys 上层过滤驱动
-2. 通过 Win32 DeviceIoControl 与 \\\\.\\HidHide 直接通信
-3. 维护白名单（允许访问手柄的应用程序，如本程序）与黑名单（需对系统屏蔽的物理设备 Instance ID）
-4. 彻底杜绝双重输入 (Double Input) 与游戏原生键位冲突，实现纯净虚拟键鼠接管
+HidHide Windows 内核过滤驱动接入层（硬件独占屏蔽与设备隐身）
+
+1. 驱动是微软 WHQL 认证的 HidHide.sys 上层过滤，挂在 HIDClass / XnaComposite / XboxComposite 上
+2. 通过 IOCTL 与 \\\\.\\HidHide 通信；该控制设备是独占的，同一时刻只允许一个客户端
+3. IOCTL 只要求 FILE_READ_DATA，因此普通权限即可读写配置，不需要管理员，也不需要 HidHide 界面
+4. 配置持久保存在受保护的注册表里，所以一律「一次会话内读→算差异→写→读回校验」，
+   并且只增删本程序登记的条目，不动其他工具写进去的内容
 """
 
 import sys
@@ -14,8 +16,9 @@ else:
     winreg = None
 import ctypes as C
 from ctypes import wintypes as W
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict, Any
+from typing import Callable, List, Tuple, Optional
 
 # HidHide 官方 IOCTL 控制码
 IOCTL_GET_WHITELIST = 0x80016000
@@ -44,13 +47,6 @@ def encode_multi_sz(strings: List[str]) -> bytes:
     return b''.join(s.encode('utf-16le') + b'\x00\x00' for s in strings) + b'\x00\x00'
 
 
-def decode_multi_sz(data: bytes) -> List[str]:
-    """从 MULTI_SZ 宽字节流解析出字符串列表"""
-    try:
-        text = data.decode('utf-16le', errors='ignore')
-        return [part.strip() for part in text.split('\x00') if part.strip()]
-    except Exception:
-        return []
 
 
 def dos_to_nt_path(dos_path: str) -> str:
@@ -69,81 +65,10 @@ def dos_to_nt_path(dos_path: str) -> str:
     return dos_path
 
 
-def find_hid_instances(vendor: Optional[int] = None, product: Optional[int] = None) -> List[str]:
-    """
-    根据 VID 与 PID，从 Windows 注册表枚举当前系统的 HID 设备实例路径 (Device Instance Path)
-    例如：'HID\\VID_054C&PID_0CE6&REV_0100\\7&1A2B3C4D&0&0000'
-    兼容普通 USB HID、蓝牙 HID、以及 Windows Bluetooth LE 格式 (如 BTHLE 实例与合成本地 XInput 实例)。
-    """
-    if sys.platform != 'win32' or winreg is None or (vendor is None and product is None):
-        return []
-
-    v_hex = f"{vendor:04X}".upper() if vendor is not None else ""
-    p_hex = f"{product:04X}".upper() if product is not None else ""
-    is_xbox_synthetic = (vendor == 0x045E and (product in (0x02FD, 0x028E, 0x02FF) or product is None))
-    xbox_pids = {"0B13", "0B12", "02E0", "02EA", "02D1", "02DD", "02E3", "0B00", "0B05", "028E", "02FF"}
-    known_mice = {"0932", "082C", "07A5"}
-
-    found = []
-    try:
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Enum\HID") as root:
-            n_subkeys = winreg.QueryInfoKey(root)[0]
-            for i in range(n_subkeys):
-                hw_name = winreg.EnumKey(root, i)
-                u = hw_name.upper()
-                if v_hex:
-                    if not (f"VID_{v_hex}" in u or f"VID&{v_hex}" in u or f"VID&02{v_hex}" in u or f"VID_{vendor:X}" in u):
-                        continue
-                if is_xbox_synthetic:
-                    if any(f"PID_{p}" in u or f"PID&{p}" in u for p in known_mice):
-                        continue
-                    if not any(f"PID_{p}" in u or f"PID&{p}" in u for p in xbox_pids):
-                        continue
-                elif p_hex:
-                    if not (f"PID_{p_hex}" in u or f"PID&{p_hex}" in u or f"PID&02{p_hex}" in u or f"PID_{product:X}" in u):
-                        continue
-                try:
-                    with winreg.OpenKey(root, hw_name) as hw_key:
-                        n_inst = winreg.QueryInfoKey(hw_key)[0]
-                        for j in range(n_inst):
-                            inst_id = winreg.EnumKey(hw_key, j)
-                            full_path = f"HID\\{hw_name}\\{inst_id}"
-                            if full_path not in found:
-                                found.append(full_path)
-                except Exception:
-                    pass
-    except Exception:
-        pass
-    return found
 
 
-def selected_device_instances(vendor, product, device_path=None):
-    """Resolve only the selected physical HID, never all pads of its model."""
-    if vendor is None or product is None:
-        return []
-    candidates = find_hid_instances(vendor, product)
-    if device_path:
-        normalized = str(device_path).upper().replace('#', '\\')
-        normalized = normalized.removeprefix('\\\\?\\')
-        normalized = normalized.split('\\{', 1)[0]
-        exact = [item for item in candidates if item.upper() == normalized]
-        return exact
-    # Legacy drivers can omit an interface path. A single match is unambiguous.
-    return candidates if len(candidates) == 1 else []
 
 
-def find_all_gamepad_instances() -> List[str]:
-    """
-    枚举系统内接入的所有手柄/游戏控制器 HID 实例路径（直接复用 device_quirks 统一厂商库）
-    """
-    from .device_quirks import KNOWN_GAMING_VENDOR_IDS
-    found = []
-    for vid in KNOWN_GAMING_VENDOR_IDS:
-        instances = find_hid_instances(vendor=vid, product=None)
-        for inst in instances:
-            if inst not in found:
-                found.append(inst)
-    return found
 
 
 def is_apple_bootcamp_environment() -> bool:
@@ -168,394 +93,659 @@ def is_apple_bootcamp_environment() -> bool:
         return False
 
 
-def hidhide_usage_guidance(bootcamp: Optional[bool] = None) -> str:
-    """Return user-facing guidance on HidHide optionality, re-plug requirement, and Bootcamp safety."""
-    if bootcamp is None:
-        bootcamp = is_apple_bootcamp_environment()
-    lines = [
-        "💡 提示：设备隐身为可选功能（非必装），不安装也可正常使用虚拟键鼠、陀螺仪、连发与截图等全部核心功能。",
-        "🔄 生效说明：开启隐身后，已运行的游戏仍持有旧设备连接；请重新拔插一次手柄（或重启游戏），并关闭 Steam 后台的手柄接管。",
-    ]
-    if bootcamp:
-        lines.append("⚠️ Bootcamp 警告：检测到 Apple Mac 双系统环境，请勿安装或启用 HidHide，以免与 Apple 内置键盘/触控板复合驱动冲突！")
-    else:
-        lines.append("⚠️ Mac 双系统提示：若使用 Mac Bootcamp 双系统，请勿安装 HidHide，以免导致内置键盘/触控板失灵。")
-    return "\n".join(lines)
 
 
-def ensure_current_app_input_access(client=None) -> Tuple[bool, str]:
-    """Allow this input application before SDL enumerates an already hidden pad.
 
-    Installation and inactive-driver checks are read-only. With active filtering,
-    only the application's access entry can be added; hiding settings stay intact.
+
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# 独占会话层
+#
+# HidHide 的控制设备用 WdfDeviceInitSetExclusive(TRUE) 创建，同一时刻只允许
+# 一个客户端打开；第二个 open 返回 ERROR_ACCESS_DENIED(5)，与是否管理员无关
+# (设备 SDDL 给 World 留了 RWX，IOCTL 也只要求 FILE_READ_DATA)。因此按 IOCTL
+# 逐条 open/close 的写法会被 HidHide 客户端、Handheld Companion 或本程序的
+# 另一个进程抢占，读回来的是“失败”，而不是“空列表”。
+# 这里一次 open 内完成整批读写；被占用时不做等待重试，直接返回占用状态，
+# 由界面提示原因并让用户手动刷新。
+# ═════════════════════════════════════════════════════════════════════════
+
+IOCTL_GET_WLINVERSE = 0x80016018
+IOCTL_SET_WLINVERSE = 0x8001601C
+IOCTL_ADD_SESSION_BLACKLIST = 0x80016020
+IOCTL_CLR_SESSION_BLACKLIST = 0x80016024
+
+CONTROL_DEVICE = r'\\.\HidHide'
+FILE_SHARE_DELETE = 0x00000004
+ERROR_FILE_NOT_FOUND = 2
+ERROR_PATH_NOT_FOUND = 3
+ERROR_ACCESS_DENIED = 5
+ERROR_SHARING_VIOLATION = 32
+_OCCUPIED_ERRORS = (ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION)
+_INVALID_HANDLE = C.c_void_p(-1).value
+
+# 已知会管理 HidHide 配置的程序；占用时用来给出疑似来源。
+HIDHIDE_CLIENTS = ('HidHideClient.exe', 'HidHideCLI.exe', 'HandheldCompanion.exe',
+                   'DS4Windows.exe', 'MotionAssistant.exe', 'MotionAssistantPlus.exe',
+                   'x360ce.exe', 'JoyToKey.exe', 'AntiMicroX.exe', 'Steam.exe')
+
+_kernel32 = None
+
+
+def win32_kernel32():
+    """kernel32 with correct prototypes; the legacy client above leaves them unset."""
+    global _kernel32
+    if _kernel32 is None and sys.platform == 'win32':
+        try:
+            k = C.WinDLL('kernel32', use_last_error=True)
+        except OSError:
+            return None
+        k.CreateFileW.restype = W.HANDLE
+        k.CreateFileW.argtypes = [W.LPCWSTR, W.DWORD, W.DWORD, C.c_void_p, W.DWORD, W.DWORD, W.HANDLE]
+        k.DeviceIoControl.restype = W.BOOL
+        k.DeviceIoControl.argtypes = [W.HANDLE, W.DWORD, C.c_void_p, W.DWORD, C.c_void_p, W.DWORD,
+                                      C.POINTER(W.DWORD), C.c_void_p]
+        k.CloseHandle.argtypes = [W.HANDLE]
+        k.FormatMessageW.restype = W.DWORD
+        k.FormatMessageW.argtypes = [W.DWORD, C.c_void_p, W.DWORD, W.DWORD, W.LPWSTR, W.DWORD, C.c_void_p]
+        k.QueryDosDeviceW.restype = W.DWORD
+        k.QueryDosDeviceW.argtypes = [W.LPCWSTR, W.LPWSTR, W.DWORD]
+        k.CreateToolhelp32Snapshot.restype = W.HANDLE
+        k.CreateToolhelp32Snapshot.argtypes = [W.DWORD, W.DWORD]
+        k.Process32FirstW.restype = W.BOOL
+        k.Process32FirstW.argtypes = [W.HANDLE, C.c_void_p]
+        k.Process32NextW.restype = W.BOOL
+        k.Process32NextW.argtypes = [W.HANDLE, C.c_void_p]
+        _kernel32 = k
+    return _kernel32
+
+
+def win_error_text(code: int) -> str:
+    if not code:
+        return ''
+    k = win32_kernel32()
+    message = ''
+    if k:
+        try:
+            buffer = C.create_unicode_buffer(512)
+            if k.FormatMessageW(0x1000, None, code, 0x0409, buffer, 512, None):
+                message = buffer.value.strip()
+        except Exception:
+            message = ''
+    return f'{message or "未知错误"} (win32={code})'
+
+
+def running_hidhide_clients() -> List[str]:
+    """Which known HidHide frontends are running; used only to name a likely holder.
+
+    We do not chase the real handle owner (that needs SeDebugPrivilege and can hang
+    on NtQueryObject), so the UI words this as a suspect, not a fact.
+    """
+    if sys.platform != 'win32':
+        return []
+    found = []
+    try:
+        k = win32_kernel32()
+        TH32CS_SNAPPROCESS = 0x00000002
+
+        class Entry(C.Structure):
+            _fields_ = [('dwSize', W.DWORD), ('cntUsage', W.DWORD), ('th32ProcessID', C.c_uint),
+                        ('th32DefaultHeapID', C.POINTER(C.c_ulong)), ('th32ModuleID', C.c_uint),
+                        ('cntThreads', W.DWORD), ('th32ParentProcessID', C.c_uint),
+                        ('pcPriClassBase', C.c_long), ('dwFlags', W.DWORD),
+                        ('szExeFile', W.WCHAR * 260)]
+
+        snapshot = k.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if snapshot == _INVALID_HANDLE:
+            return []
+        try:
+            entry = Entry()
+            entry.dwSize = C.sizeof(Entry)
+            first = k.Process32FirstW(snapshot, C.byref(entry))
+            current = entry if first else None
+            while current is not None:
+                name = str(current.szExeFile or '')
+                if name.lower() in [item.lower() for item in HIDHIDE_CLIENTS] and name not in found:
+                    found.append(name)
+                nxt = Entry()
+                nxt.dwSize = C.sizeof(nxt)
+                current = nxt if k.Process32NextW(snapshot, C.byref(nxt)) else None
+        finally:
+            k.CloseHandle(snapshot)
+    except Exception:
+        return found
+    return found
+
+
+def occupied_reason(holders: Optional[List[str]] = None) -> str:
+    names = holders if holders is not None else running_hidhide_clients()
+    if names:
+        return f'设备隐身配置正被 {"、".join(names)} 使用，无法读取或修改。关闭它后点「刷新」。'
+    return '设备隐身配置正被其他程序占用，无法读取或修改。关闭 HidHide 配置界面等程序后点「刷新」。'
+
+
+def decode_list(data: Optional[bytes]) -> Optional[List[str]]:
+    """None means the read was unusable; an empty list means the driver really is empty.
+
+    An empty list comes back as a single UTF-16 null (2 bytes), not as the 4-byte
+    double terminator this module sends, so length checks must not assume symmetry.
+    """
+    if data is None or len(data) < 2 or len(data) % 2:
+        return None
+    try:
+        text = data.decode('utf-16le', errors='strict')
+    except UnicodeError:
+        return None
+    return [item for item in text.split('\x00') if item]
+
+
+def same_paths(left, right) -> bool:
+    return {os.path.normcase(item) for item in (left or ())} == {os.path.normcase(item) for item in (right or ())}
+
+
+@dataclass(frozen=True)
+class DriverInfo:
+    installed: bool = False
+    loaded: bool = False
+    occupied: bool = False
+    package_version: str = ''
+    driver_version: str = ''
+    install_path: str = ''
+    cli_path: str = ''
+    client_path: str = ''
+    watchdog: str = ''
+    service_state: str = ''
+    error: str = ''
+
+    @property
+    def ready(self) -> bool:
+        return bool(self.installed and self.loaded)
+
+
+@dataclass(frozen=True)
+class HidHideState:
+    loaded: bool = False
+    active: bool = False
+    inverse: bool = False
+    whitelist: Tuple[str, ...] = ()
+    blacklist: Tuple[str, ...] = ()
+    occupied: bool = False
+    holders: Tuple[str, ...] = ()
+    error: str = ''
+
+
+@dataclass(frozen=True)
+class Change:
+    whitelist: Optional[Tuple[str, ...]] = None
+    blacklist: Optional[Tuple[str, ...]] = None
+    active: Optional[bool] = None
+
+
+@dataclass(frozen=True)
+class Operation:
+    ok: bool
+    message: str = ''
+    occupied: bool = False
+    holders: Tuple[str, ...] = ()
+    state: Optional[HidHideState] = None
+
+    @property
+    def failed(self) -> bool:
+        return not self.ok
+
+
+class HidHideSession:
+    """One exclusive handle for a whole batch of HidHide reads and writes."""
+
+    def __init__(self):
+        self._handle = None
+        self.occupied = False
+        self.holders: Tuple[str, ...] = ()
+        self.error = ''
+
+    def __enter__(self):
+        self.open()
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+    def open(self) -> bool:
+        if self._handle:
+            return True
+        self.occupied = False
+        self.holders = ()
+        self.error = ''
+        k = win32_kernel32()
+        if not k:
+            self.error = 'HidHide 仅支持 Windows'
+            return False
+        handle = k.CreateFileW(CONTROL_DEVICE, GENERIC_READ,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               None, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, None)
+        if handle and handle != _INVALID_HANDLE:
+            self._handle = handle
+            return True
+        code = C.get_last_error()
+        if code in _OCCUPIED_ERRORS:
+            self.occupied = True
+            self.holders = tuple(running_hidhide_clients())
+            self.error = occupied_reason(list(self.holders))
+        elif code in (ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND):
+            self.error = '未检测到运行中的设备隐身驱动。'
+        else:
+            self.error = win_error_text(code) or '无法打开设备隐身驱动。'
+        return False
+
+    def close(self):
+        k = win32_kernel32()
+        handle, self._handle = self._handle, None
+        if k and handle:
+            try:
+                k.CloseHandle(handle)
+            except Exception:
+                pass
+
+    def _ioctl(self, code: int, in_bytes: bytes = b'', out_size: Optional[int] = None):
+        k = win32_kernel32()
+        if not (k and self._handle):
+            return None
+        in_buffer = C.create_string_buffer(in_bytes, len(in_bytes)) if in_bytes else None
+        if out_size is None:
+            needed = W.DWORD(0)
+            k.DeviceIoControl(self._handle, code, in_buffer, 0, None, 0, C.byref(needed), None)
+            out_size = max(needed.value, 2)
+        out_buffer = C.create_string_buffer(out_size) if out_size else None
+        returned = W.DWORD(0)
+        ok = k.DeviceIoControl(self._handle, code, in_buffer, len(in_bytes),
+                               out_buffer, out_size, C.byref(returned), None)
+        if not ok:
+            self.error = win_error_text(C.get_last_error())
+            return None
+        return out_buffer.raw[:returned.value] if out_buffer else b''
+
+    def _read_flag(self, code: int):
+        data = self._ioctl(code, out_size=1)
+        return None if data is None or len(data) < 1 else bool(data[0])
+
+    def _read_list(self, code: int):
+        return decode_list(self._ioctl(code))
+
+    def read(self) -> HidHideState:
+        if not self._handle and not self.open():
+            return HidHideState(occupied=self.occupied, holders=self.holders, error=self.error)
+        active = self._read_flag(IOCTL_GET_ACTIVE)
+        inverse = self._read_flag(IOCTL_GET_WLINVERSE)
+        whitelist = self._read_list(IOCTL_GET_WHITELIST)
+        blacklist = self._read_list(IOCTL_GET_BLACKLIST)
+        if active is None or whitelist is None or blacklist is None:
+            return HidHideState(occupied=self.occupied, holders=self.holders,
+                                error=self.error or '无法读取设备隐身配置')
+        return HidHideState(loaded=True, active=active, inverse=bool(inverse),
+                            whitelist=tuple(whitelist), blacklist=tuple(blacklist))
+
+    def apply(self, change: Change) -> Operation:
+        if not self._handle and not self.open():
+            return Operation(False, self.error, self.occupied, self.holders)
+        before = self.read()
+        if not before.loaded:
+            return Operation(False, before.error, before.occupied, before.holders, before)
+        writes = []
+        if change.whitelist is not None and not same_paths(change.whitelist, before.whitelist):
+            writes.append((IOCTL_SET_WHITELIST, encode_multi_sz(list(change.whitelist))))
+        if change.blacklist is not None and not same_paths(change.blacklist, before.blacklist):
+            writes.append((IOCTL_SET_BLACKLIST, encode_multi_sz(list(change.blacklist))))
+        if change.active is not None and change.active != before.active:
+            writes.append((IOCTL_SET_ACTIVE, b'\x01' if change.active else b'\x00'))
+        for code, payload in writes:
+            if self._ioctl(code, payload, 0) is None:
+                return Operation(False, f'写入失败：{self.error}', self.occupied, self.holders, before)
+        after = self.read()
+        if not after.loaded:
+            return Operation(False, f'写入后无法确认结果：{self.error}', after.occupied, after.holders, before)
+        if change.whitelist is not None and not same_paths(change.whitelist, after.whitelist):
+            return Operation(False, '写入后校验不一致：应用列表未生效', False, (), after)
+        if change.blacklist is not None and not same_paths(change.blacklist, after.blacklist):
+            return Operation(False, '写入后校验不一致：隐藏设备列表未生效', False, (), after)
+        if change.active is not None and change.active != after.active:
+            return Operation(False, '写入后校验不一致：总开关未生效', False, (), after)
+        return Operation(True, '', False, (), after)
+
+
+def read_state(session: Optional[HidHideSession] = None) -> HidHideState:
+    if session is not None:
+        return session.read()
+    with HidHideSession() as own:
+        return own.read()
+
+
+def transact(mutator: Callable[[HidHideState], Optional[Change]]) -> Operation:
+    """Read, mutate, write and verify inside a single exclusive session."""
+    with HidHideSession() as session:
+        state = session.read()
+        if not state.loaded:
+            return Operation(False, state.error, state.occupied, state.holders, state)
+        change = mutator(state)
+        if change is None:
+            return Operation(True, '', False, (), state)
+        return session.apply(change)
+
+
+def _reg_value(root, key, value):
+    if winreg is None:
+        return None
+    try:
+        with winreg.OpenKey(root, key) as handle:
+            return winreg.QueryValueEx(handle, value)[0]
+    except OSError:
+        return None
+
+
+def _file_version(path: str) -> str:
+    if sys.platform != 'win32' or not path or not os.path.isfile(path):
+        return ''
+    try:
+        version_dll = C.WinDLL('version', use_last_error=True)
+        size = version_dll.GetFileVersionInfoSizeW(path, None)
+        if not size:
+            return ''
+        block = C.create_string_buffer(size)
+        if not version_dll.GetFileVersionInfoW(path, 0, size, block):
+            return ''
+        pointer = C.POINTER(C.c_void_p)()
+        length = W.UINT(0)
+        if not version_dll.VerQueryValueW(block, '\\VarFileInfo\\Translation', C.byref(pointer), C.byref(length)):
+            return ''
+        pair = C.cast(pointer, C.POINTER(W.WORD * 2)).contents
+        sub = f'\\StringFileInfo\\{pair[0]:04x}{pair[1]:04x}\\FileVersion'
+        if not version_dll.VerQueryValueW(block, sub, C.byref(pointer), C.byref(length)):
+            return ''
+        return (C.cast(pointer, W.LPWSTR).value or '').strip()
+    except Exception:
+        return ''
+
+
+def _service_state(name: str) -> str:
+    if sys.platform != 'win32':
+        return ''
+    states = {1: 'stopped', 2: 'start pending', 3: 'stop pending', 4: 'running', 5: 'continue pending', 6: 'pause pending', 7: 'paused'}
+
+    class _Status(C.Structure):
+        _fields_ = [('service_type', W.DWORD), ('current_state', W.DWORD),
+                    ('controls_accepted', W.DWORD), ('win32_exit_code', W.DWORD),
+                    ('service_exit_code', W.DWORD), ('check_point', W.DWORD),
+                    ('wait_hint', W.DWORD)]
+
+    try:
+        adv = C.WinDLL('advapi32', use_last_error=True)
+        adv.OpenSCManagerW.restype = W.HANDLE
+        adv.OpenSCManagerW.argtypes = [W.LPCWSTR, W.LPCWSTR, W.DWORD]
+        adv.OpenServiceW.restype = W.HANDLE
+        adv.OpenServiceW.argtypes = [W.HANDLE, W.LPCWSTR, W.DWORD]
+        adv.QueryServiceStatus.argtypes = [W.HANDLE, C.POINTER(_Status)]
+        adv.CloseServiceHandle.argtypes = [W.HANDLE]
+        manager = adv.OpenSCManagerW(None, None, 0x0001)
+        if not manager:
+            return ''
+        try:
+            service = adv.OpenServiceW(manager, name, 0x0004)
+            if not service:
+                return ''
+            try:
+                status = _Status()
+                if not adv.QueryServiceStatus(service, C.byref(status)):
+                    return ''
+                return states.get(status.current_state, 'unknown')
+            finally:
+                adv.CloseServiceHandle(service)
+        finally:
+            adv.CloseServiceHandle(manager)
+    except Exception:
+        return ''
+
+
+UNINSTALL_ROOTS = (r'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+                   r'SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall')
+
+
+def _package_registration() -> dict:
+    if winreg is None:
+        return {}
+    for root in UNINSTALL_ROOTS:
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, root) as parent:
+                for index in range(winreg.QueryInfoKey(parent)[0]):
+                    name = winreg.EnumKey(parent, index)
+                    try:
+                        with winreg.OpenKey(parent, name) as entry:
+                            display = str(winreg.QueryValueEx(entry, 'DisplayName')[0])
+                            if 'HidHide' not in display:
+                                continue
+                            result = {}
+                            for key, value in (('package_version', 'DisplayVersion'),
+                                               ('install_path', 'InstallLocation')):
+                                try:
+                                    result[key] = str(winreg.QueryValueEx(entry, value)[0] or '')
+                                except OSError:
+                                    result[key] = ''
+                            return result
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return {}
+
+
+def driver_info() -> DriverInfo:
+    """Layered detection: package registration, service, driver binary, live control device."""
+    if sys.platform != 'win32':
+        return DriverInfo(error='HidHide 仅支持 Windows')
+    package = _package_registration()
+    install_path = package.get('install_path', '')
+    if not install_path:
+        guess = Path(r'C:\Program Files\Nefarius Software Solutions\HidHide')
+        install_path = str(guess) if guess.is_dir() else ''
+    cli_path = ''
+    client_path = ''
+    if install_path:
+        for name in ('HidHideCLI.exe', 'HidHideClient.exe'):
+            for folder in (Path(install_path) / 'x64', Path(install_path)):
+                candidate = folder / name
+                if candidate.is_file():
+                    if name == 'HidHideCLI.exe':
+                        cli_path = str(candidate)
+                    else:
+                        client_path = str(candidate)
+                    break
+    service = _reg_value(winreg.HKEY_LOCAL_MACHINE, r'SYSTEM\CurrentControlSet\Services\HidHide', 'ImagePath') \
+        if winreg is not None else None
+    driver_path = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32', 'drivers', 'HidHide.sys')
+    installed = bool(service or package or os.path.isfile(driver_path))
+    info = DriverInfo(installed=installed,
+                      package_version=package.get('package_version', ''),
+                      driver_version=_file_version(driver_path),
+                      install_path=install_path,
+                      cli_path=cli_path,
+                      client_path=client_path,
+                      watchdog=_service_state('HidHideWatchdog.exe') or _service_state('HidHideWatchdog'),
+                      service_state=_service_state('HidHide'))
+    with HidHideSession() as session:
+        info = replace(info, loaded=bool(session._handle),
+                       occupied=bool(session.occupied),
+                       error='' if session._handle else session.error)
+    return info
+
+
+def self_app_paths() -> List[str]:
+    """NT image paths this program can run as; HidHide matches the process image, not a DOS path."""
+    if sys.platform != 'win32':
+        return []
+    candidates = [sys.executable, getattr(sys, '_base_executable', '') or '']
+    executable = Path(sys.executable)
+    if getattr(sys, 'frozen', False):
+        candidates.append(str(executable.with_name('DualSenseStudio.exe')))
+    elif 'python' in executable.name.lower():
+        candidates += [str(executable.with_name('python.exe')), str(executable.with_name('pythonw.exe'))]
+    paths = []
+    for candidate in candidates:
+        if not candidate or not os.path.isfile(candidate):
+            continue
+        nt = dos_to_nt_path(candidate)
+        if nt and nt not in paths:
+            paths.append(nt)
+    return paths
+
+
+def ensure_self_access(session: Optional[HidHideSession] = None) -> Tuple[bool, str]:
+    """登记本程序的手柄访问权限，供 SDL 枚举之前调用。
+
+    只在过滤真正生效、且我们还没在列表里时才写；反向模式下列表含义反转，
+    登记自身反而会把自己禁掉，所以跳过。
     """
     if sys.platform != 'win32':
         return True, ''
-    try:
-        client = client if client is not None else HidHideClient()
-        if not client.is_driver_installed():
-            return True, ''
-        ok, active = client._send_ioctl(IOCTL_GET_ACTIVE, out_size=1)
-        if not ok or len(active) != 1:
-            return False, '无法读取手柄访问状态，已隐身的手柄可能不可见。'
-        if not active[0]:
-            return True, ''
-        if not client.allow_current_input_app():
-            return False, '无法登记当前程序的手柄访问权限，已隐身的手柄可能不可见。'
+    state = session.read() if session is not None else read_state()
+    if not state.loaded:
+        return (False, state.error) if state.occupied else (True, '')
+    if state.inverse or not state.active:
         return True, ''
-    except Exception:
-        return False, '无法登记当前程序的手柄访问权限，已隐身的手柄可能不可见。'
+    missing = [path for path in self_app_paths()
+               if not any(existing.upper() == path.upper() for existing in state.whitelist)]
+    if not missing:
+        return True, ''
 
-
-class HidHideClient:
-    """
-    HidHide 驱动通信客户端
-    负责查询驱动状态、配置应用白名单、设备黑名单与全局激活状态
-    """
-    def __init__(self):
-        self._kernel32 = None
-        if sys.platform == 'win32':
-            try:
-                self._kernel32 = C.WinDLL('kernel32', use_last_error=True)
-            except Exception:
-                self._kernel32 = None
-        try:
-            if self.is_driver_installed():
-                self.sanitize_blacklist()
-        except Exception:
-            pass
-
-    def is_driver_installed(self) -> bool:
-        """检查系统是否安装了 HidHide 过滤驱动"""
-        if sys.platform != 'win32':
-            return False
-
-        # 方式 1：检查服务注册表项
-        try:
-            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Services\HidHide") as k:
-                return True
-        except Exception:
-            pass
-
-        # 方式 2：尝试打开设备句柄
-        h = self._open_device(read_only=True)
-        if h is not None and h != INVALID_HANDLE_VALUE:
-            self._close_device(h)
-            return True
-
-        return False
-
-    def _open_device(self, read_only: bool = False) -> Optional[int]:
-        if not self._kernel32:
+    def mutate(current: HidHideState) -> Optional[Change]:
+        if current.inverse:
             return None
-        access = GENERIC_READ if read_only else (GENERIC_READ | GENERIC_WRITE)
-        h = self._kernel32.CreateFileW(
-            r"\\.\HidHide",
-            access,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            None
-        )
-        if h == INVALID_HANDLE_VALUE or h is None:
-            return None
-        return h
-
-    def _close_device(self, handle: int):
-        if self._kernel32 and handle and handle != INVALID_HANDLE_VALUE:
-            try:
-                self._kernel32.CloseHandle(handle)
-            except Exception:
-                pass
-
-    def _send_ioctl(self, ioctl_code: int, in_bytes: bytes = b'', out_size: int = 4096) -> Tuple[bool, bytes]:
-        """向 \\\\.\\HidHide 发送 IOCTL 命令"""
-        h = self._open_device(read_only=(ioctl_code in (IOCTL_GET_ACTIVE, IOCTL_GET_WHITELIST, IOCTL_GET_BLACKLIST)))
-        if not h:
-            return False, b''
-
-        try:
-            in_buf = None
-            in_len = len(in_bytes)
-            if in_len > 0:
-                in_buf = (C.c_char * in_len).from_buffer_copy(in_bytes)
-
-            out_buf = None
-            if out_size > 0:
-                out_buf = (C.c_char * out_size)()
-
-            bytes_returned = W.DWORD(0)
-            ok = self._kernel32.DeviceIoControl(
-                h,
-                ioctl_code,
-                in_buf,
-                in_len,
-                out_buf,
-                out_size,
-                C.byref(bytes_returned),
-                None
-            )
-            if ok:
-                ret_data = bytes(out_buf[:bytes_returned.value]) if out_buf else b''
-                return True, ret_data
-            return False, b''
-        finally:
-            self._close_device(h)
-
-    def is_active(self) -> bool:
-        """获取全局设备隐身功能是否处于激活状态"""
-        ok, data = self._send_ioctl(IOCTL_GET_ACTIVE, out_size=1)
-        if ok and len(data) >= 1:
-            return bool(data[0])
-        return False
-
-    def set_active(self, active: bool) -> bool:
-        """开启或关闭全局设备隐身功能"""
-        in_byte = b'\x01' if active else b'\x00'
-        ok, _ = self._send_ioctl(IOCTL_SET_ACTIVE, in_bytes=in_byte, out_size=0)
-        return ok
-
-    def get_whitelist(self) -> List[str]:
-        """获取当前允许直接穿透访问手柄的白名单程序绝对路径列表"""
-        ok, data = self._send_ioctl(IOCTL_GET_WHITELIST, out_size=8192)
-        if ok:
-            return decode_multi_sz(data)
-        return []
-
-    def set_whitelist(self, paths: List[str]) -> bool:
-        """设置允许穿透的白名单程序列表"""
-        payload = encode_multi_sz(paths)
-        ok, _ = self._send_ioctl(IOCTL_SET_WHITELIST, in_bytes=payload, out_size=0)
-        return ok
-
-    def _read_whitelist_checked(self) -> Tuple[bool, List[str]]:
-        """Keep a failed or truncated read distinct from an empty access list."""
-        ok, data = self._send_ioctl(IOCTL_GET_WHITELIST, out_size=8192)
-        if not ok or len(data) < 4 or len(data) % 2 or not data.endswith(b'\x00\x00\x00\x00'):
-            return False, []
-        try:
-            text = data.decode('utf-16le', errors='strict')
-        except UnicodeError:
-            return False, []
-        return True, [item for item in text.split('\x00') if item]
-
-    def _append_whitelist_paths(self, paths: List[str]) -> bool:
-        ok, whitelist = self._read_whitelist_checked()
-        if not ok:
-            return False
-        original = list(whitelist)
-        for path in paths:
-            normalized = os.path.normpath(path).casefold()
-            if not any(os.path.normpath(existing).casefold() == normalized for existing in whitelist):
+        whitelist = list(current.whitelist)
+        for path in missing:
+            if not any(existing.upper() == path.upper() for existing in whitelist):
                 whitelist.append(path)
-        return self.set_whitelist(whitelist) if whitelist != original else True
+        return Change(whitelist=tuple(whitelist)) if whitelist != list(current.whitelist) else None
 
-    def allow_current_input_app(self) -> bool:
-        """Register only this executable, preserving every existing access entry."""
-        candidates = [sys.executable]
-        nt_path = dos_to_nt_path(sys.executable)
-        if nt_path and nt_path not in candidates:
-            candidates.append(nt_path)
-        return self._append_whitelist_paths(candidates)
+    result = transact(mutate)
+    if not result.ok:
+        return False, result.message or '无法登记本程序的手柄访问权限，已隐身的手柄可能不可见。'
+    return True, ''
 
-    def add_current_app_to_whitelist(self) -> bool:
-        """确保当前运行的 Python 进程及其同伴程序 (python.exe, pythonw.exe 等，包含 venv 与真实基准解释器) 在白名单中 (同时加入 NT 设备路径与 DOS 路径)"""
-        curr_exe = sys.executable
-        base_exe = getattr(sys, '_base_executable', curr_exe)
-        paths_to_add = [curr_exe, base_exe]
-        for exe in (curr_exe, base_exe):
-            p_obj = Path(exe)
-            if 'python' in p_obj.name.lower():
-                pyw = str(p_obj.with_name('pythonw.exe'))
-                py = str(p_obj.with_name('python.exe'))
-                for candidate in (pyw, py):
-                    if os.path.isfile(candidate) and candidate not in paths_to_add:
-                        paths_to_add.append(candidate)
 
-        # 转换为完整候选列表（DOS + NT 路径）
-        full_candidates = []
-        for p in paths_to_add:
-            full_candidates.append(p)
-            nt_p = dos_to_nt_path(p)
-            if nt_p and nt_p not in full_candidates:
-                full_candidates.append(nt_p)
+# ── 驱动安装与修复 ─────────────────────────────────────────────────
+# 内核驱动安装必须提权、通常要重启，这是唯一无法避免的一次 UAC；装好之后
+# 的所有配置读写都不再需要管理员。安装包是上游未修改的官方包，先校验哈希。
 
-        return self._append_whitelist_paths(full_candidates)
+INSTALLER_SHA256 = 'f4bbbcb82e6258641b887c74bc81c4c5f66e4aa811808dfc304347687b7605f6'
+INSTALLER_NAME = 'HidHide_1.5.230_x64.exe'
+REBOOT_CODES = (1641, 3010)
+CANCELLED_CODES = (1223, 1602)
 
-    def get_blacklist(self) -> List[str]:
-        """获取当前被屏蔽隐身的外设 Instance ID 列表"""
-        ok, data = self._send_ioctl(IOCTL_GET_BLACKLIST, out_size=8192)
-        if ok:
-            return decode_multi_sz(data)
-        return []
 
-    def set_blacklist(self, device_instance_ids: List[str]) -> bool:
-        """设置被屏蔽隐身的外设列表"""
-        payload = encode_multi_sz(device_instance_ids)
-        ok, _ = self._send_ioctl(IOCTL_SET_BLACKLIST, in_bytes=payload, out_size=0)
-        return ok
+@dataclass(frozen=True)
+class InstallResult:
+    ok: bool
+    message: str = ''
+    reboot_required: bool = False
+    cancelled: bool = False
+    code: int = 0
 
-    def sanitize_blacklist(self) -> bool:
-        return True
 
-    def cloak_all_controllers(self) -> Tuple[bool, str]:
-        """彻底对外部系统隐身并屏蔽所有接入的手柄设备（无论是 PS5、Xbox 还是 Switch Pro 等）"""
-        return self.cloak_controller(None, None)
+def bundled_installer() -> str:
+    here = Path(__file__).resolve().parent / 'native' / 'hidhide' / INSTALLER_NAME
+    if here.is_file():
+        return str(here)
+    return ''
 
-    def uncloak_all_controllers(self) -> Tuple[bool, str]:
-        """解除所有手柄的隐身屏蔽，清空黑名单并关闭全局过滤驱动，恢复系统共享访问"""
-        return self.uncloak_controller(None, None)
 
-    def cloak_controller(self, vendor: Optional[int] = None, product: Optional[int] = None, device_path=None) -> Tuple[bool, str]:
-        """
-        对控制器执行一键独占隐身接管：
-        1. 确保当前主程序在白名单中
-        2. 查找特定控制器或系统内所有接入的手柄物理实例 ID
-        3. 添加至黑名单并激活驱动
-        若直接内核 IOCTL 因权限不足受阻，自动调用 HidHideCLI 申请 Windows 管理员提权完成配置
-        """
-        if sys.platform != 'win32':
-            return False, "HidHide 仅支持 Windows，macOS 无法隐藏手柄原始输入"
-        if not self.is_driver_installed():
-            return False, "未检测到 HidHide 驱动，请先安装驱动"
+def _sha256(path: str) -> str:
+    import hashlib
+    digest = hashlib.sha256()
+    try:
+        with open(path, 'rb') as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+                digest.update(chunk)
+    except OSError:
+        return ''
+    return digest.hexdigest()
 
-        if vendor is not None or product is not None:
-            instances = selected_device_instances(vendor, product, device_path)
-        else:
-            instances = find_all_gamepad_instances()
 
-        if not instances:
-            return False, "无法唯一匹配当前设备的 HID 节点，请重新连接后重试"
+def _run_elevated_wait(program: str, arguments: str) -> int:
+    """ShellExecuteExW with runas; returns the exit code, or -1 when it could not start."""
+    SW_SHOW = 5
+    SEE_MASK_NOCLOSEPROCESS = 0x00000040
+    INFINITE = 0xFFFFFFFF
 
-        # 尝试通过直接内核 IOCTL 通信
-        direct_ok = False
+    class Info(C.Structure):
+        _fields_ = [('cbSize', W.DWORD), ('fMask', W.ULONG), ('hwnd', W.HWND),
+                    ('lpVerb', W.LPCWSTR), ('lpFile', W.LPCWSTR), ('lpParameters', W.LPCWSTR),
+                    ('lpDirectory', W.LPCWSTR), ('nShow', W.INT), ('hInstApp', W.HINSTANCE),
+                    ('lpIDList', C.c_void_p), ('lpClass', W.LPCWSTR), ('hkeyClass', W.HANDLE),
+                    ('dwHotKey', W.DWORD), ('hIcon', W.HANDLE), ('hProcess', W.HANDLE)]
+
+    try:
+        shell32 = C.WinDLL('shell32', use_last_error=True)
+        kernel = win32_kernel32()
+        info = Info()
+        info.cbSize = C.sizeof(Info)
+        info.fMask = SEE_MASK_NOCLOSEPROCESS
+        info.lpVerb = 'runas'
+        info.lpFile = program
+        info.lpParameters = arguments
+        info.nShow = SW_SHOW
+        if not shell32.ShellExecuteExW(C.byref(info)):
+            return -1
+        if not info.hProcess:
+            return 0
         try:
-            wl_ok = self.add_current_app_to_whitelist()
-            blacklist = self.get_blacklist()
-            for inst in instances:
-                norm_inst = inst.upper()
-                if not any(b.upper() == norm_inst for b in blacklist):
-                    blacklist.append(inst)
-            bl_ok = self.set_blacklist(blacklist)
-            act_ok = self.set_active(True)
-            if wl_ok and bl_ok and act_ok:
-                direct_ok = True
-        except Exception:
-            direct_ok = False
-
-        if direct_ok:
-            return True, f"已成功将 {len(instances)} 个硬件手柄节点屏蔽，对外部游戏完全隐身（请重新拔插一次手柄或重启游戏使其生效）"
-
-        # 若直接通信未成功（非管理员或受系统权限限制），通过 HidHideCLI 进行 UAC 提权代理
-        cli_path = r"C:\Program Files\Nefarius Software Solutions\HidHide\x64\HidHideCLI.exe"
-        if os.path.exists(cli_path):
-            hide_args = " ".join([f'--dev-hide "{inst}"' for inst in instances])
-            pyw = sys.executable.replace("python.exe", "pythonw.exe")
-            app_args = f'--app-reg "{sys.executable}" --app-reg "{pyw}"'
-            cmd = f'Start-Process "{cli_path}" -ArgumentList \'{app_args} {hide_args} --cloak-on\' -Verb RunAs -Wait'
-            try:
-                import subprocess
-                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if sys.platform == "win32" else 0
-                ret = subprocess.call(["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", cmd], creationflags=flags)
-                if ret == 0:
-                    return True, f"已通过管理员权限成功将 {len(instances)} 个硬件手柄节点屏蔽，对外部游戏完全隐身（请重新拔插一次手柄或重启游戏使其生效）"
-            except Exception as e:
-                return False, f"管理员提权执行失败: {e}"
-
-        return False, "写入黑名单失败，请检查驱动权限或以管理员身份运行工作台"
-
-    def uncloak_controller(self, vendor: Optional[int] = None, product: Optional[int] = None, device_path=None) -> Tuple[bool, str]:
-        """解除特定控制器的隐身屏蔽，恢复系统共享访问"""
-        if sys.platform != 'win32':
-            return False, "HidHide 仅支持 Windows，macOS 无法隐藏手柄原始输入"
-        if not self.is_driver_installed():
-            return False, "未检测到 HidHide 驱动"
-
-        cli_path = r"C:\Program Files\Nefarius Software Solutions\HidHide\x64\HidHideCLI.exe"
-        targets = selected_device_instances(vendor, product, device_path) if vendor is not None or product is not None else None
-        if targets == []:
-            # 当设备已拔出/断开导致 find_hid_instances 为空时，从黑名单中基于路径或 VID/PID 找回匹配项
-            candidates = find_hid_instances(vendor, product)
-            if not candidates:
-                blacklist = self.get_blacklist()
-                if device_path:
-                    normalized = str(device_path).upper().replace('#', '\\')
-                    normalized = normalized.removeprefix('\\\\?\\').split('\\{', 1)[0]
-                    matched_in_bl = [item for item in blacklist if item.upper() == normalized]
-                    if matched_in_bl:
-                        targets = matched_in_bl
-                elif vendor is not None:
-                    v_hex = f"{vendor:04X}".upper()
-                    p_hex = f"{product:04X}".upper() if product is not None else ""
-                    matched_in_bl = [
-                        item for item in blacklist
-                        if f"VID_{v_hex}" in item.upper() or f"VID&{v_hex}" in item.upper()
-                    ]
-                    if p_hex:
-                        matched_in_bl = [
-                            item for item in matched_in_bl
-                            if f"PID_{p_hex}" in item.upper() or f"PID&{p_hex}" in item.upper()
-                        ]
-                    if len(matched_in_bl) == 1:
-                        targets = matched_in_bl
-                    elif len(matched_in_bl) == 0:
-                        if not blacklist and self.is_active():
-                            self.set_active(False)
-                        return True, "当前手柄未处于屏蔽状态（已恢复共享访问）"
-
-        if targets == []:
-            return False, "无法唯一匹配当前设备的 HID 节点，请重新连接后重试"
-        remaining = [item for item in self.get_blacklist() if targets is not None and item.upper() not in {target.upper() for target in targets}]
-
-        # 尝试直接 IOCTL 通信
-        direct_ok = False
-        try:
-            if not vendor and not product:
-                if self.set_blacklist([]) and self.set_active(False):
-                    direct_ok = True
-            else:
-                if self.set_blacklist(remaining) and self.set_active(bool(remaining)):
-                    direct_ok = True
-        except Exception:
-            direct_ok = False
-
-        if direct_ok:
-            if not vendor and not product:
-                return True, "已恢复所有手柄共享访问，驱动过滤已关闭"
-            return True, "已解除控制器隐身，系统已恢复共享访问"
-
-        # 提权回退
-        if os.path.exists(cli_path):
-            if not vendor and not product:
-                cmd = f'Start-Process "{cli_path}" -ArgumentList \'--cloak-off\' -Verb RunAs -Wait'
-            else:
-                instances = targets
-                unhide_args = " ".join([f'--dev-unhide "{inst}"' for inst in instances]) if instances else ""
-                cloak_flag = '--cloak-on' if remaining else '--cloak-off'
-                cmd = f'Start-Process "{cli_path}" -ArgumentList \'{unhide_args} {cloak_flag}\' -Verb RunAs -Wait'
-            try:
-                import subprocess
-                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if sys.platform == "win32" else 0
-                result = subprocess.call(["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", cmd], creationflags=flags)
-                if result == 0:
-                    if not vendor and not product:
-                        return True, "已恢复所有手柄共享访问"
-                    return True, "已解除当前控制器隐身"
-            except Exception:
-                pass
-
-        return False, "解除当前设备隐身失败，请检查驱动权限"
+            kernel32 = kernel or C.WinDLL('kernel32', use_last_error=True)
+            kernel32.WaitForSingleObject.argtypes = [W.HANDLE, W.DWORD]
+            kernel32.WaitForSingleObject(info.hProcess, INFINITE)
+            exit_code = W.DWORD(0)
+            kernel32.GetExitCodeProcess.argtypes = [W.HANDLE, C.POINTER(W.DWORD)]
+            kernel32.GetExitCodeProcess(info.hProcess, C.byref(exit_code))
+            return int(exit_code.value)
+        finally:
+            kernel32.CloseHandle(info.hProcess)
+    except Exception:
+        return -1
 
 
-    def get_status_summary(self) -> Dict[str, Any]:
-        """获取综合状态字典"""
-        installed = self.is_driver_installed()
-        active = self.is_active() if installed else False
-        return {
-            "installed": installed,
-            "active": active,
-            "whitelist_count": len(self.get_whitelist()) if installed else 0,
-            "blacklist_count": len(self.get_blacklist()) if installed else 0,
-            "release_url": HIDHIDE_RELEASE_URL,
-        }
+def install_driver() -> InstallResult:
+    if sys.platform != 'win32':
+        return InstallResult(False, '设备隐身驱动仅支持 Windows。')
+    if is_apple_bootcamp_environment():
+        return InstallResult(False,
+                             '检测到 Apple Boot Camp 环境：HidHide 会与苹果内置键盘/触控板的复合驱动冲突，'
+                             '可能导致内置输入设备失灵，因此拒绝安装。')
+    installer = bundled_installer()
+    if not installer:
+        return InstallResult(False, '安装包未随本程序发布，请到官方发布页下载安装。')
+    if _sha256(installer) != INSTALLER_SHA256:
+        return InstallResult(False, '安装包校验失败（SHA-256 不匹配），已取消安装。')
+    code = _run_elevated_wait(installer, '/quiet')
+    if code in CANCELLED_CODES:
+        return InstallResult(False, '已取消安装。', cancelled=True, code=code)
+    if code in REBOOT_CODES:
+        return InstallResult(True, '驱动已安装，需要重启系统后生效。', reboot_required=True, code=code)
+    if code == 0:
+        return InstallResult(True, '驱动已安装。若手柄仍未生效，请重启系统。', code=code)
+    if code < 0:
+        return InstallResult(False, '无法启动安装程序。', code=code)
+    return InstallResult(False, f'安装未完成（退出码 {code}）。', code=code)
+
+
+def start_driver_service() -> InstallResult:
+    """驱动已安装但没在跑时的修复入口（例如被手动停止）。"""
+    if sys.platform != 'win32':
+        return InstallResult(False, '设备隐身驱动仅支持 Windows。')
+    code = _run_elevated_wait(os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32', 'sc.exe'),
+                              'start HidHide')
+    if code in CANCELLED_CODES:
+        return InstallResult(False, '已取消。', cancelled=True, code=code)
+    if code == 0:
+        return InstallResult(True, '已请求启动设备隐身驱动。', code=code)
+    if code == 1056:
+        return InstallResult(True, '驱动已在运行。', code=code)
+    if code < 0:
+        return InstallResult(False, '无法启动服务控制程序。', code=code)
+    return InstallResult(False, f'启动驱动服务失败（退出码 {code}），请重启系统后重试。', code=code)
+

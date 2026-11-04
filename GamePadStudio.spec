@@ -37,6 +37,20 @@ if sys.platform == 'win32':
         ('gamepadstudio/native/ViGEmClient-PROVENANCE.txt', 'licenses'),
     ]
 
+# The official HidHide setup package, unmodified, so the app can install the filter
+# driver with one click instead of sending the user to a download page. It ships as
+# data (not a binary) because PyInstaller must not treat an 8 MB installer as an
+# importable DLL; the app verifies its SHA-256 before running it elevated.
+if sys.platform == 'win32':
+    hidhide_setup = 'gamepadstudio/native/hidhide/HidHide_1.5.230_x64.exe'
+    if not os.path.isfile(hidhide_setup):
+        raise RuntimeError(f'{hidhide_setup} is missing; the app could not offer one-click driver install.')
+    added_files += [
+        (hidhide_setup, 'gamepadstudio/native/hidhide'),
+        ('gamepadstudio/native/hidhide/HidHide-LICENSE.txt', 'licenses'),
+        ('gamepadstudio/native/hidhide/HidHide-PROVENANCE.txt', 'licenses'),
+    ]
+
 # Keep the runtime path stable regardless of the wheel's versioned filename.
 # TOCs use (destination, source, type); preserve executable permissions and
 # PyInstaller signing by including FFmpeg as a binary instead of data.
@@ -61,6 +75,9 @@ hidden_imports = [
     'gamepadstudio.glass',
     'gamepadstudio.haptic_engine',
     'gamepadstudio.hidhide',
+    'gamepadstudio.hidhide_devices',
+    'gamepadstudio.hidhide_control',
+    'gamepadstudio.hidhide_ui',
     'gamepadstudio.input_tester',
     'gamepadstudio.ipc',
     'gamepadstudio.kbm_mapper',

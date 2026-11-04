@@ -27,7 +27,6 @@ from .glass import (
     TOKENS, GlassPanel, IconButton, Toggle,
     SquircleBadge, glyph
 )
-from .hidhide import HidHideClient, HIDHIDE_RELEASE_URL
 from .i18n import tr, tr_profile
 from .controller_glyphs import (button_text, display_parts, draw_token,
                                 token_advance, make_token_label)
@@ -1846,10 +1845,6 @@ class VirtualKbmPage(QWidget):
     def handle_device_input(self, state):
         self.set_device_state(state)
 
-    def get_current_device_info(self):
-        state = self.owner.snapshot or self.device_state or {}
-        return state.get('vendor'), state.get('product')
-
     def open_cloaking(self):
         if sys.platform == 'darwin' and not WINDOWS_FEATURES:
             if not (self.owner.snapshot or self.device_state):
@@ -1867,97 +1862,28 @@ class VirtualKbmPage(QWidget):
         if not WINDOWS_FEATURES:
             self.owner.notify(tr('HidHide 仅支持 Windows，macOS 无法隐藏手柄原始输入'))
             return
-        if not hasattr(self, 'hidhide'):
-            from .hidhide import hidhide_usage_guidance
-            self.hidhide = HidHideClient()
-            self.cloaking_dialog = QDialog(self); self.cloaking_dialog.setWindowTitle(tr('设备隐身'))
-            layout = QVBoxLayout(self.cloaking_dialog)
-            self.cloaking_toggle = Toggle(tr('向其他应用隐藏手柄原始输入'))
-            self.cloaking_status_label = QLabel(); self.cloaking_status_label.setWordWrap(True)
-            self.cloaking_guidance_label = label(hidhide_usage_guidance(), 'caption', True)
-            self.btn_uncloak_all = QPushButton(tr('一键恢复所有手柄共享访问'))
-            self.btn_uncloak_all.setToolTip(tr('清空驱动隐身黑名单并关闭过滤，立即恢复手柄在系统与其他游戏中的可见性'))
-            self.btn_uncloak_all.clicked.connect(self.uncloak_all_controllers_action)
-            self.btn_install_driver = QPushButton(tr('打开 HidHide 驱动页面'))
-            self.btn_install_driver.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(HIDHIDE_RELEASE_URL)))
-            layout.addWidget(self.cloaking_status_label); layout.addWidget(self.cloaking_toggle)
-            layout.addWidget(self.cloaking_guidance_label)
-            layout.addWidget(self.btn_uncloak_all); layout.addWidget(self.btn_install_driver)
-            self.cloaking_toggle.toggled.connect(self.toggle_cloaking)
-        self.refresh_cloaking_status()
-        self.cloaking_dialog.show()
+        opener = getattr(self.owner, 'open_hidhide_panel', None)
+        if opener is None:
+            self.owner.notify(tr('当前界面无法打开设备隐身配置'))
+            return
+        opener()
 
     def refresh_cloaking_status(self):
-        if sys.platform == 'darwin' and not WINDOWS_FEATURES:
-            from .controller_isolation_service import isolation_status
-            info = isolation_status(self.owner.device)
-            self.cloaking_toggle.blockSignals(True)
-            self.cloaking_toggle.setChecked(bool(info.get('active') or info.get('restore_pending')))
-            self.cloaking_toggle.setEnabled(bool(info.get('supported') or info.get('restore_pending')))
-            self.cloaking_toggle.blockSignals(False)
-            self.cloaking_status_label.setText(info.get('reason') or tr('已隔离当前手柄的原始输入；关闭或退出时恢复共享访问') if info.get('active') else info.get('reason') or tr('当前手柄原始输入可见；开启会阻止游戏原生手柄输入'))
+        if sys.platform != 'darwin' or WINDOWS_FEATURES:
             return
-        vendor, product = self.get_current_device_info()
-        installed = self.hidhide.is_driver_installed()
-        from .hidhide import selected_device_instances
-        state = self.owner.snapshot or self.device_state or {}
-        instances = selected_device_instances(vendor, product, state.get('device_path')) if vendor and product and installed else []
-        blacklist = self.hidhide.get_blacklist() if installed else []
-        hidden = {item.upper() for item in blacklist} if instances else set()
-        active = bool(installed and instances and self.hidhide.is_active() and all(item.upper() in hidden for item in instances))
-        has_hidden_nodes = bool(installed and (self.hidhide.is_active() or len(blacklist) > 0))
-
-        self.cloaking_toggle.blockSignals(True); self.cloaking_toggle.setChecked(active)
-        self.cloaking_toggle.setEnabled(bool(installed and vendor)); self.cloaking_toggle.blockSignals(False)
-        self.btn_install_driver.setVisible(not installed)
-        if hasattr(self, 'btn_uncloak_all'):
-            self.btn_uncloak_all.setEnabled(bool(installed and has_hidden_nodes))
-            self.btn_uncloak_all.setVisible(bool(installed))
-
-        if not vendor:
-            text = tr('未连接设备（检测到驱动屏蔽已激活，可点击下方一键恢复）') if has_hidden_nodes else tr('未连接设备')
-        elif not installed:
-            text = tr('HidHide 未安装')
-        elif active:
-            text = tr('已隐身（当前设备的原始输入已隐藏）')
-        else:
-            text = tr('当前设备原始输入可见')
-        self.cloaking_status_label.setText(text)
-
-    def uncloak_all_controllers_action(self):
-        if not WINDOWS_FEATURES:
-            return
-        ok, text = self.hidhide.uncloak_all_controllers()
-        if hasattr(self.owner, '_cloaked_devices'):
-            self.owner._cloaked_devices.clear()
-        self.owner.setting('device_cloaking_enabled', False)
-        self.refresh_cloaking_status()
-        self.cloaking_status_label.setText(text)
+        from .controller_isolation_service import isolation_status
+        info = isolation_status(self.owner.device)
+        self.cloaking_toggle.blockSignals(True)
+        self.cloaking_toggle.setChecked(bool(info.get('active') or info.get('restore_pending')))
+        self.cloaking_toggle.setEnabled(bool(info.get('supported') or info.get('restore_pending')))
+        self.cloaking_toggle.blockSignals(False)
+        self.cloaking_status_label.setText(info.get('reason') or tr('已隔离当前手柄的原始输入；关闭或退出时恢复共享访问') if info.get('active') else info.get('reason') or tr('当前手柄原始输入可见；开启会阻止游戏原生手柄输入'))
+        return
 
     def toggle_cloaking(self, enabled):
-        if sys.platform == 'darwin' and not WINDOWS_FEATURES:
-            result = self.owner.set_controller_isolation(enabled)
-            self.refresh_cloaking_status()
-            self.cloaking_status_label.setText(result['message'])
-            self.owner.refresh_controller_isolation()
+        if not (sys.platform == 'darwin' and not WINDOWS_FEATURES):
             return
-        if not WINDOWS_FEATURES:
-            return
-        vendor, product = self.get_current_device_info()
-        if not vendor or not product:
-            self.refresh_cloaking_status()
-            return
-        state = self.owner.snapshot or self.device_state or {}
-        kwargs = {'device_path': state['device_path']} if state.get('device_path') else {}
-        ok, text = self.hidhide.cloak_controller(vendor, product, **kwargs) if enabled else self.hidhide.uncloak_controller(vendor, product, **kwargs)
-        if ok:
-            self.owner.setting('device_cloaking_enabled', enabled)
-            key = (vendor, product, kwargs.get('device_path'))
-            if not hasattr(self.owner, '_cloaked_devices'):
-                self.owner._cloaked_devices = set()
-            if enabled:
-                self.owner._cloaked_devices.add(key)
-            else:
-                self.owner._cloaked_devices.discard(key)
+        result = self.owner.set_controller_isolation(enabled)
         self.refresh_cloaking_status()
-        self.cloaking_status_label.setText(text)
+        self.cloaking_status_label.setText(result['message'])
+        self.owner.refresh_controller_isolation()

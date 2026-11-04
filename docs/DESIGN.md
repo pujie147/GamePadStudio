@@ -228,11 +228,17 @@ stateDiagram-v2
 
 ### 6.1 HidHide 驱动级设备隐形伪装
 在 Windows 平台上，手柄直接连接时会暴露原始 HID 接口，导致游戏同时收到手柄与模拟键鼠双重输入（即“双键冲突/双重响应”）。  
-系统内置 [`dualsense5/hidhide.py`](file:///d:/dualsense5_screenshot/dualsense5/hidhide.py) 模块：
-- 通过 Win32 `DeviceIoControl` 与内核驱动 `\\.\HidHide` 通信。
-- 将当前 GamePad Studio 进程注入白名单 (`IOCTL_SET_WHITELIST`)。
-- 将目标手柄的设备符号链接放入黑名单 (`IOCTL_SET_BLACKLIST`)。
-- 开启隐藏锁 (`IOCTL_SET_ACTIVE`)，对系统中其他所有游戏和 Windows Shell 彻底隐身物理手柄，仅暴露映射后的干净输入。
+驱动以 upper filter 挂在 `HIDClass`、`XnaComposite`、`XboxComposite` 三类设备上，因此只屏蔽 HID 子接口不足以消除双重输入，XInput 通道必须一起处理。
+
+本程序分三层访问它：
+
+| 层 | 文件 | 职责 |
+| --- | --- | --- |
+| 传输 | [`hidhide.py`](file:///C:/Users/pyg12/gitProjects/GamePadStudio/gamepadstudio/hidhide.py) | `IOCTL 2048–2057` 会话：一次 open 内完成读→写→读回校验；控制设备是**独占**的（`WdfDeviceInitSetExclusive`），被占用时直接报告而不重试；IOCTL 只要求 `FILE_READ_DATA`，配置读写不需要管理员 |
+| 目录 | [`hidhide_devices.py`](file:///C:/Users/pyg12/gitProjects/GamePadStudio/gamepadstudio/hidhide_devices.py) | 按 base container 分组的 HID 集合枚举，并按 HidHide 的规则算出隐藏路径集合（容器节点 + 每个 HID 子节点 + XInput 节点，XInput 节点按设备类识别） |
+| 操作 | [`hidhide_control.py`](file:///C:/Users/pyg12/gitProjects/GamePadStudio/gamepadstudio/hidhide_control.py) | 差异式写入：只增删本程序登记的条目，保留其他工具的白名单/黑名单；开启隐藏前先登记自身，避免自锁；反向白名单模式只检测不篡改 |
+
+界面（`hidhide_ui.py` + 设备概览行）通过 `owner.hidhide(action)` 访问，远程模式下由后台 Agent 独占写入。隐身是**手动且持久**的：连接手柄或重载配置都不会自动改驱动，退出时只解除本程序自己添加的隐藏。内核驱动安装是唯一需要提权的动作，由随包的官方安装包（校验 SHA-256）以 `/quiet` 完成。
 
 ### 6.2 Game Bar 弹窗静默屏蔽盾 (`gamebar_shield.py`)
 按下 Xbox 手柄西瓜键或截图键时，Windows 默认会弹出 Xbox Game Bar 截图提示或全屏覆盖层。

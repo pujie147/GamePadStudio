@@ -110,8 +110,6 @@ def battery_workspace(tmp_path, monkeypatch, request):
                         MappingRuntime(actions, dispatch, start_mouse=False))
     monkeypatch.setattr('gamepadstudio.studio.QSystemTrayIcon', FakeTray)
     monkeypatch.setattr('gamepadstudio.studio.autostart_enabled', lambda root=None: False)
-    monkeypatch.setattr('gamepadstudio.hidhide.HidHideClient.is_driver_installed',
-                        lambda self: False)
     monkeypatch.setattr('gamepadstudio.application_profiles.foreground_application',
                         lambda: {'hwnd': 0, 'pid': 0, 'executable': ''})
     window = Studio(tmp_path, standalone=True, lang=getattr(request, 'param', 'zh'))

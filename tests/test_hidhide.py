@@ -1,642 +1,261 @@
-import os
-import sys
-from pathlib import Path
-from unittest.mock import MagicMock, patch
-from types import SimpleNamespace
-import pytest
-from gamepadstudio import hidhide
+"""HidHide 传输层与驱动探测的单元测试：全程不碰真实驱动。"""
 
+import sys
+from types import SimpleNamespace
+
+import pytest
+
+from gamepadstudio import hidhide
 from gamepadstudio.hidhide import (
-    HidHideClient,
-    ensure_current_app_input_access,
+    Change,
+    DriverInfo,
+    HidHideSession,
+    HidHideState,
+    decode_list,
+    dos_to_nt_path,
     encode_multi_sz,
-    decode_multi_sz,
-    find_hid_instances,
-    selected_device_instances,
-    IOCTL_GET_WHITELIST,
-    IOCTL_SET_WHITELIST,
-    IOCTL_GET_BLACKLIST,
-    IOCTL_SET_BLACKLIST,
-    IOCTL_GET_ACTIVE,
-    IOCTL_SET_ACTIVE,
+    occupied_reason,
+    same_paths,
+    win_error_text,
 )
 
 
 @pytest.fixture(autouse=True)
-def block_native_hidhide_access(monkeypatch):
-    """These tests never inspect or change the host's real driver state."""
-    import gamepadstudio.hidhide as module
-    # Exercise Windows policy with local stand-ins; never change Python's host
-    # platform or allow a fixture to load/query the real driver.
-    windows_sys = SimpleNamespace(**vars(sys))
-    windows_sys.platform = 'win32'
-    monkeypatch.setattr(module, 'sys', windows_sys)
-    monkeypatch.setattr(HidHideClient, 'is_driver_installed', lambda self: False)
-    monkeypatch.setattr(HidHideClient, '_send_ioctl', lambda self, *args, **kwargs: (False, b''))
-
-    def no_registry(*args, **kwargs):
-        raise OSError('Registry access is isolated in tests')
-
-    monkeypatch.setattr(module, 'winreg', SimpleNamespace(
-        OpenKey=no_registry, HKEY_LOCAL_MACHINE='HKLM'))
-    native_ctypes = SimpleNamespace(**vars(module.C))
-    native_ctypes.WinDLL = no_registry
-    native_ctypes.windll = SimpleNamespace(kernel32=SimpleNamespace(QueryDosDeviceW=no_registry))
-    monkeypatch.setattr(module, 'C', native_ctypes)
-    from gamepadstudio import virtual_kbm_ui
-    monkeypatch.setattr(virtual_kbm_ui, 'WINDOWS_FEATURES', True)
-    original_exists = module.os.path.exists
-    cli = r'C:\Program Files\Nefarius Software Solutions\HidHide\x64\HidHideCLI.exe'
-    monkeypatch.setattr(module.os.path, 'exists', lambda path: False if str(path) == cli else original_exists(path))
-
-
-def test_multi_sz_codec():
-    # Empty
-    assert decode_multi_sz(encode_multi_sz([])) == []
-
-    # Single
-    single = ["C:\\App\\app.exe"]
-    enc = encode_multi_sz(single)
-    assert decode_multi_sz(enc) == single
-
-    # Multiple with unicode
-    items = [
-        "C:\\Program Files\\Nefarius\\app.exe",
-        "D:\\无限暖暖\\game.exe",
-        "HID\\VID_054C&PID_0CE6\\7&123456&0&0000"
-    ]
-    enc = encode_multi_sz(items)
-    dec = decode_multi_sz(enc)
-    assert dec == items
-
-
-def bootstrap_driver(monkeypatch, active=True, whitelist=()):
-    client = HidHideClient()
-    state = {'whitelist': list(whitelist), 'writes': [], 'reads': []}
-    monkeypatch.setattr(client, 'is_driver_installed', lambda: True)
-
-    def send_ioctl(code, in_bytes=b'', out_size=4096):
-        if code == IOCTL_GET_ACTIVE:
-            state['reads'].append(code)
-            return True, bytes([active])
-        if code == IOCTL_GET_WHITELIST:
-            state['reads'].append(code)
-            return True, encode_multi_sz(state['whitelist'])
-        assert code == IOCTL_SET_WHITELIST, 'Bootstrap may only append application access'
-        state['writes'].append(code)
-        state['whitelist'] = decode_multi_sz(in_bytes)
-        return True, b''
-
-    monkeypatch.setattr(client, '_send_ioctl', send_ioctl)
-    return client, state
-
-
-def test_bootstrap_active_hidhide_preserves_entries_and_adds_only_current_executable(monkeypatch):
-    current = r'D:\GamePadStudio\GamePadStudio.exe'
-    nt_current = r'\Device\HarddiskVolume5\GamePadStudio\GamePadStudio.exe'
-    existing = [r'\Device\HarddiskVolume4\Other App\app.exe', r'C:\Existing\tool.exe']
-    client, state = bootstrap_driver(monkeypatch, whitelist=existing)
-    monkeypatch.setattr(hidhide.sys, 'executable', current)
-    monkeypatch.setattr(hidhide.sys, '_base_executable', r'C:\Python\python.exe')
-    monkeypatch.setattr('gamepadstudio.hidhide.dos_to_nt_path', lambda path: nt_current)
-    ok, message = ensure_current_app_input_access(client)
-    assert ok and not message
-    assert state['whitelist'] == existing + [current, nt_current]
-    assert state['writes'] == [IOCTL_SET_WHITELIST]
-
-
-def test_bootstrap_inactive_hidhide_only_reads_activity(monkeypatch):
-    client, state = bootstrap_driver(monkeypatch, active=False)
-    assert ensure_current_app_input_access(client) == (True, '')
-    assert state['reads'] == [IOCTL_GET_ACTIVE]
-    assert not state['writes']
-
-
-def test_bootstrap_without_driver_does_not_query_or_write_it(monkeypatch):
-    client = HidHideClient()
-    monkeypatch.setattr(client, '_send_ioctl', lambda *args, **kwargs: pytest.fail('No driver access expected'))
-    assert ensure_current_app_input_access(client) == (True, '')
-
-
-def test_bootstrap_existing_access_is_idempotent_and_preserves_other_entries(monkeypatch):
-    current = r'D:\GamePadStudio\GamePadStudio.exe'
-    existing = [r'C:\Other\app.exe', current.upper()]
-    client, state = bootstrap_driver(monkeypatch, whitelist=existing)
-    monkeypatch.setattr(hidhide.sys, 'executable', current)
-    monkeypatch.setattr('gamepadstudio.hidhide.dos_to_nt_path', lambda path: path)
-    assert ensure_current_app_input_access(client) == (True, '')
-    assert state['whitelist'] == existing and not state['writes']
-
-
-@pytest.mark.parametrize('code', [IOCTL_GET_ACTIVE, IOCTL_GET_WHITELIST])
-def test_bootstrap_read_failure_never_replaces_access_list(monkeypatch, code):
-    client, state = bootstrap_driver(monkeypatch, whitelist=[r'C:\Other\app.exe'])
-    original = client._send_ioctl
-    monkeypatch.setattr(client, '_send_ioctl',
-                        lambda query, **kwargs: (False, b'') if query == code else original(query, **kwargs))
-    ok, warning = ensure_current_app_input_access(client)
-    assert not ok and warning
-    assert state['whitelist'] == [r'C:\Other\app.exe'] and not state['writes']
-
-
-@pytest.mark.parametrize('payload', [b'', b'\x00', b'\x00\x00', b'\x61\x00',
-                                    b'\x00\xd8\x00\x00\x00\x00'])
-def test_bootstrap_invalid_or_truncated_list_never_writes(monkeypatch, payload):
-    client, state = bootstrap_driver(monkeypatch)
-    original = client._send_ioctl
-    monkeypatch.setattr(client, '_send_ioctl',
-                        lambda query, **kwargs: (True, payload) if query == IOCTL_GET_WHITELIST else original(query, **kwargs))
-    ok, warning = ensure_current_app_input_access(client)
-    assert not ok and warning and not state['writes']
-
-
-def test_regular_app_registration_also_refuses_failed_whitelist_read(monkeypatch):
-    client = HidHideClient()
-    writes = []
-    monkeypatch.setattr(client, '_send_ioctl', lambda *args, **kwargs: (False, b''))
-    monkeypatch.setattr(client, 'set_whitelist', lambda value: writes.append(value) or True)
-    assert client.add_current_app_to_whitelist() is False
-    assert not writes
-
-
-def test_bootstrap_write_failure_returns_warning_without_changing_hiding(monkeypatch):
-    client, state = bootstrap_driver(monkeypatch, whitelist=[r'C:\Other\app.exe'])
-    monkeypatch.setattr(client, 'set_whitelist', lambda value: False)
-    ok, warning = ensure_current_app_input_access(client)
-    assert not ok and warning and not state['writes']
-
-
-def test_find_hid_instances():
-    # When vendor and product are None, should safely return empty list to prevent cloaking all devices
-    all_instances = find_hid_instances()
-    assert all_instances == []
-    # Test specific filter
-    filtered = find_hid_instances(vendor=0xFFFF, product=0xFFFF)
-    assert isinstance(filtered, list)
-    assert len(filtered) == 0
-
-
-
-def test_hidhide_client_mock_interactions():
-    client = HidHideClient()
-
-    # Mock open_device & send_ioctl
-    mock_active = False
-    mock_whitelist = ["C:\\Existing\\app.exe"]
-    mock_blacklist = []
-
-    def fake_send_ioctl(ioctl, in_bytes=b'', out_size=4096):
-        nonlocal mock_active, mock_whitelist, mock_blacklist
-        if ioctl == IOCTL_GET_ACTIVE:
-            return True, (b'\x01' if mock_active else b'\x00')
-        elif ioctl == IOCTL_SET_ACTIVE:
-            mock_active = bool(in_bytes[0]) if in_bytes else False
-            return True, b''
-        elif ioctl == IOCTL_GET_WHITELIST:
-            return True, encode_multi_sz(mock_whitelist)
-        elif ioctl == IOCTL_SET_WHITELIST:
-            mock_whitelist = decode_multi_sz(in_bytes)
-            return True, b''
-        elif ioctl == IOCTL_GET_BLACKLIST:
-            return True, encode_multi_sz(mock_blacklist)
-        elif ioctl == IOCTL_SET_BLACKLIST:
-            mock_blacklist = decode_multi_sz(in_bytes)
-            return True, b''
-        return False, b''
-
-    with patch.object(client, 'is_driver_installed', return_value=True), \
-         patch.object(client, '_send_ioctl', side_effect=fake_send_ioctl):
-
-        assert client.is_driver_installed() is True
-
-        # Test active toggle
-        assert client.is_active() is False
-        assert client.set_active(True) is True
-        assert client.is_active() is True
-        assert client.set_active(False) is True
-        assert client.is_active() is False
-
-        # Test whitelist
-        wl = client.get_whitelist()
-        assert wl == ["C:\\Existing\\app.exe"]
-        assert client.add_current_app_to_whitelist() is True
-        assert sys.executable in client.get_whitelist()
-
-        # Test cloak controller
-        with patch('gamepadstudio.hidhide.find_hid_instances', return_value=["HID\\VID_054C&PID_0CE6\\INST_1"]):
-            ok, msg = client.cloak_controller(0x054C, 0x0CE6)
-            assert ok is True
-            assert "HID\\VID_054C&PID_0CE6\\INST_1" in client.get_blacklist()
-            assert client.is_active() is True
-
-            # Test uncloak
-            ok, msg = client.uncloak_controller(0x054C, 0x0CE6)
-            assert ok is True
-            assert "HID\\VID_054C&PID_0CE6\\INST_1" not in client.get_blacklist()
-
-        # Status summary
-        status = client.get_status_summary()
-        assert status["installed"] is True
-
-
-def test_virtual_kbm_ui_cloaking_integration(tmp_path, monkeypatch):
-    from PySide6.QtWidgets import QApplication
-    from gamepadstudio.virtual_kbm_ui import VirtualKbmPage
-    from gamepadstudio.studio_core import ConfigStore
-    from tests.mapping_fixtures import MappingOwner
-
-    app = QApplication.instance() or QApplication([])
-    owner = MappingOwner(tmp_path)
-    store = owner.store
-    instance = r'HID\VID_054C&PID_0CE6\INST_1'
-    owner.snapshot = dict(device_key='ps:first', family='dualsense', vendor=0x054C, product=0x0CE6)
-
-    def setting(key, value):
-        store.set_setting(key, value, owner.snapshot)
-        store.save()
-
-    monkeypatch.setattr(owner, 'setting', setting)
-    hidden = [instance]
-
-    try:
-        with patch.object(VirtualKbmPage, 'get_current_device_info', return_value=(0x054C, 0x0CE6)):
-            with patch.object(HidHideClient, 'is_driver_installed', return_value=False):
-                page = VirtualKbmPage(owner, store=store)
-                page.open_cloaking()
-
-                # Verify cloaking UI components exist
-                assert hasattr(page, 'cloaking_toggle')
-                assert hasattr(page, 'cloaking_status_label')
-                assert hasattr(page, 'btn_install_driver')
-
-                # Check fallback uninstalled state
-                assert page.cloaking_toggle.isEnabled() is False
-                assert "未安装" in page.cloaking_status_label.text()
-
-            # Simulate HidHide installed and active
-            with patch.object(page.hidhide, 'is_driver_installed', return_value=True), \
-                 patch.object(page.hidhide, 'is_active', return_value=True), \
-                 patch.object(page.hidhide, 'get_blacklist', side_effect=lambda: hidden[:]), \
-                 patch('gamepadstudio.hidhide.find_hid_instances', return_value=[instance]):
-                page.refresh_cloaking_status()
-                assert page.cloaking_toggle.isEnabled() is True
-                assert page.cloaking_toggle.isChecked() is True
-                assert "已隐身" in page.cloaking_status_label.text()
-
-                # Simulate toggling off
-                def uncloak(vendor, product):
-                    hidden.clear()
-                    return True, 'ok'
-
-                with patch.object(page.hidhide, 'uncloak_controller', side_effect=uncloak):
-                    page.cloaking_toggle.setChecked(False)
-                    assert store.settings_for(owner.snapshot)['device_cloaking_enabled'] is False
-                    assert not page.cloaking_toggle.isChecked()
-
-    finally:
-        owner.close()
-
-
-def test_xbox_cloaking_refused_and_sanitized():
-    client = HidHideClient()
-    mock_active = True
-    mock_blacklist = [
-        "HID\\VID_045E&PID_0B13\\12345",
-        "HID\\VID_054C&PID_0CE6\\67890"
-    ]
-
-    def fake_send_ioctl(ioctl, in_bytes=b'', out_size=4096):
-        nonlocal mock_active, mock_blacklist
-        if ioctl == IOCTL_GET_ACTIVE:
-            return True, (b'\x01' if mock_active else b'\x00')
-        elif ioctl == IOCTL_SET_ACTIVE:
-            mock_active = bool(in_bytes[0]) if in_bytes else False
-            return True, b''
-        elif ioctl == IOCTL_GET_BLACKLIST:
-            return True, encode_multi_sz(mock_blacklist)
-        elif ioctl == IOCTL_SET_BLACKLIST:
-            mock_blacklist = decode_multi_sz(in_bytes)
-            return True, b''
-        return False, b''
-
-    with patch.object(client, 'is_driver_installed', return_value=True), \
-         patch.object(client, '_send_ioctl', side_effect=fake_send_ioctl), \
-         patch.object(client, 'add_current_app_to_whitelist', return_value=True), \
-         patch('gamepadstudio.hidhide.find_hid_instances', return_value=['HID\\VID_045E&PID_0B13\\12345']), \
-         patch('gamepadstudio.hidhide.find_all_gamepad_instances', return_value=['HID\\VID_045E&PID_0B13\\12345']):
-
-        # 1. Universal gamepad support: Xbox and PS5 controllers are both supported for cloaking
-        ok, msg = client.cloak_controller(0x045E, 0x0B13)
-        assert ok is True
-        assert "硬件手柄节点屏蔽" in msg
-
-        # 2. Blacklist sanitation is non-destructive
-        res = client.sanitize_blacklist()
-        assert res is True
-
-
-def test_virtual_kbm_ui_xbox_cloaking_enabled(tmp_path):
-    from PySide6.QtWidgets import QApplication
-    from gamepadstudio.virtual_kbm_ui import VirtualKbmPage
-    from gamepadstudio.studio_core import ConfigStore
-    from tests.mapping_fixtures import MappingOwner
-
-    app = QApplication.instance() or QApplication([])
-    owner = MappingOwner(tmp_path)
-    store = owner.store
-
-    try:
-        page = VirtualKbmPage(owner, store=store)
-        page.open_cloaking()
-        owner.snapshot = dict(device_key='xbox:first', family='xbox', vendor=0x045E,
-                              product=0x02FD, name='Xbox Controller')
-        page.set_device_state(owner.snapshot)
-
-        with patch.object(page.hidhide, 'is_driver_installed', return_value=True), \
-             patch('gamepadstudio.hidhide.find_hid_instances', return_value=[r'HID\VID_045E&PID_02FD\FIRST']):
-            page.refresh_cloaking_status()
-            assert page.cloaking_toggle.isEnabled() is True
-    finally:
-        owner.close()
-
-
-FIRST_PAD = r'HID\VID_054C&PID_0CE6\FIRST'
-SECOND_PAD = r'HID\VID_054C&PID_0CE6\SECOND'
-FIRST_PATH = r'\\?\hid#vid_054c&pid_0ce6#first#{4d1e55b2-f16f-11cf-88cb-001111000030}'
-SECOND_PATH = r'\\?\hid#vid_054c&pid_0ce6#second#{4d1e55b2-f16f-11cf-88cb-001111000030}'
-
-
-def isolated_driver(monkeypatch, blacklist=()):
-    """Keep the real filtering code, but put all driver data in memory."""
-    client = HidHideClient()
-    hardware = {'blacklist': list(blacklist), 'active': bool(blacklist), 'writes': []}
-
-    def set_blacklist(values):
-        hardware['blacklist'] = list(values)
-        hardware['writes'].append(('blacklist', list(values)))
-        return True
-
-    def set_active(value):
-        hardware['active'] = bool(value)
-        hardware['writes'].append(('active', bool(value)))
-        return True
-
-    monkeypatch.setattr(client, 'is_driver_installed', lambda: True)
-    monkeypatch.setattr(client, 'get_blacklist', lambda: hardware['blacklist'][:])
-    monkeypatch.setattr(client, 'set_blacklist', set_blacklist)
-    monkeypatch.setattr(client, 'is_active', lambda: hardware['active'])
-    monkeypatch.setattr(client, 'set_active', set_active)
-    monkeypatch.setattr(client, 'add_current_app_to_whitelist', lambda: True)
-    monkeypatch.setattr('gamepadstudio.hidhide.find_hid_instances', lambda *args: [FIRST_PAD, SECOND_PAD])
-    monkeypatch.setattr('gamepadstudio.hidhide.find_all_gamepad_instances',
-                        lambda: pytest.fail('A selected-device operation must not enumerate other controllers'))
-    return client, hardware
-
-
-def test_selected_instances_normalize_physical_path_and_reject_ambiguous_models(monkeypatch):
-    monkeypatch.setattr('gamepadstudio.hidhide.find_hid_instances', lambda *args: [FIRST_PAD, SECOND_PAD])
-    assert selected_device_instances(0x054C, 0x0CE6, FIRST_PATH) == [FIRST_PAD]
-    assert selected_device_instances(0x054C, 0x0CE6, SECOND_PATH) == [SECOND_PAD]
-    assert selected_device_instances(0x054C, 0x0CE6) == []
-    assert selected_device_instances(0x054C, 0x0CE6, FIRST_PATH.replace('first', 'unknown')) == []
-    assert selected_device_instances(None, None, FIRST_PATH) == []
-    monkeypatch.setattr('gamepadstudio.hidhide.find_hid_instances', lambda *args: [FIRST_PAD])
-    assert selected_device_instances(0x054C, 0x0CE6) == [FIRST_PAD]
-
-
-def test_cloak_only_selected_physical_pad_from_two_identical_models(monkeypatch):
-    client, hardware = isolated_driver(monkeypatch)
-    ok, message = client.cloak_controller(0x054C, 0x0CE6, device_path=FIRST_PATH)
-    assert ok and hardware['blacklist'] == [FIRST_PAD]
-    assert hardware['active']
-    assert SECOND_PAD not in hardware['blacklist']
-
-
-def test_uncloak_selected_pad_preserves_other_hidden_pad_and_driver_activity(monkeypatch):
-    client, hardware = isolated_driver(monkeypatch, [FIRST_PAD, SECOND_PAD])
-    ok, message = client.uncloak_controller(0x054C, 0x0CE6, device_path=FIRST_PATH)
-    assert ok and hardware['blacklist'] == [SECOND_PAD]
-    assert hardware['active']
-    ok, message = client.uncloak_controller(0x054C, 0x0CE6, device_path=SECOND_PATH)
-    assert ok and hardware['blacklist'] == []
-    assert not hardware['active']
-
-
-@pytest.mark.parametrize('path', [None, FIRST_PATH.replace('first', 'unknown')])
-@pytest.mark.parametrize('method', ['cloak_controller', 'uncloak_controller'])
-def test_unmatched_or_ambiguous_device_cannot_change_driver_state(monkeypatch, path, method):
-    client, hardware = isolated_driver(monkeypatch, [SECOND_PAD])
-    ok, message = getattr(client, method)(0x054C, 0x0CE6, device_path=path)
-    assert not ok and '唯一匹配' in message
-    assert hardware['blacklist'] == [SECOND_PAD] and hardware['active']
-    assert hardware['writes'] == []
-
-
-def test_cloaking_ui_shows_selected_pad_status_instead_of_global_active(tmp_path, monkeypatch):
-    from PySide6.QtWidgets import QApplication
-    from gamepadstudio.virtual_kbm_ui import VirtualKbmPage
-    from tests.mapping_fixtures import MappingOwner
-    app = QApplication.instance() or QApplication([])
-    owner = MappingOwner(tmp_path)
-    first = dict(device_key='ps:first', family='dualsense', vendor=0x054C,
-                 product=0x0CE6, device_path=FIRST_PATH)
-    second = {**first, 'device_key': 'ps:second', 'device_path': SECOND_PATH}
-    owner.snapshot = first
-    monkeypatch.setattr('gamepadstudio.hidhide.find_hid_instances', lambda *args: [FIRST_PAD, SECOND_PAD])
-    monkeypatch.setattr(HidHideClient, 'is_driver_installed', lambda self: True)
-    monkeypatch.setattr(HidHideClient, 'is_active', lambda self: True)
-    monkeypatch.setattr(HidHideClient, 'get_blacklist', lambda self: [FIRST_PAD])
-    try:
-        page = VirtualKbmPage(owner, store=owner.store)
-        page.open_cloaking()
-        assert page.cloaking_toggle.isChecked()
-        assert '已隐身' in page.cloaking_status_label.text()
-        owner.snapshot = second
-        page.refresh_cloaking_status()
-        assert not page.cloaking_toggle.isChecked()
-        assert '原始输入可见' in page.cloaking_status_label.text()
-    finally:
-        owner.close()
-
-
-def test_cloaking_ui_without_device_disables_control_and_ignores_toggle(tmp_path, monkeypatch):
-    from PySide6.QtWidgets import QApplication
-    from gamepadstudio.virtual_kbm_ui import VirtualKbmPage
-    from tests.mapping_fixtures import MappingOwner
-    app = QApplication.instance() or QApplication([])
-    owner = MappingOwner(tmp_path)
-    monkeypatch.setattr(HidHideClient, 'is_driver_installed', lambda self: True)
-    cloak = MagicMock()
-    uncloak = MagicMock()
-    monkeypatch.setattr(HidHideClient, 'cloak_controller', cloak)
-    monkeypatch.setattr(HidHideClient, 'uncloak_controller', uncloak)
-    try:
-        page = VirtualKbmPage(owner, store=owner.store)
-        page.open_cloaking()
-        assert not page.cloaking_toggle.isEnabled()
-        assert '未连接设备' in page.cloaking_status_label.text()
-        page.cloaking_toggle.setChecked(True)
-        assert not page.cloaking_toggle.isChecked()
-        cloak.assert_not_called()
-        uncloak.assert_not_called()
-        assert owner.store.settings_for(None)['device_cloaking_enabled']
-    finally:
-        owner.close()
-
-
-def test_uncloak_all_controllers_clears_blacklist_and_disables_filtering(monkeypatch):
-    client, hardware = isolated_driver(monkeypatch, [FIRST_PAD, SECOND_PAD])
-    assert hardware['active'] is True
-    ok, message = client.uncloak_all_controllers()
-    assert ok is True
-    assert hardware['blacklist'] == []
-    assert hardware['active'] is False
-    assert '已恢复所有手柄共享访问' in message
-
-
-def test_uncloak_disconnected_controller_matching_blacklist_path(monkeypatch):
-    client, hardware = isolated_driver(monkeypatch, [FIRST_PAD])
-    # When controller is disconnected, find_hid_instances returns empty
-    monkeypatch.setattr('gamepadstudio.hidhide.find_hid_instances', lambda *args: [])
-    ok, message = client.uncloak_controller(0x054C, 0x0CE6, device_path=FIRST_PATH)
-    assert ok is True
-    assert hardware['blacklist'] == []
-    assert hardware['active'] is False
-
-
-def test_uncloak_disconnected_controller_matching_unique_vid_pid_in_blacklist(monkeypatch):
-    client, hardware = isolated_driver(monkeypatch, [FIRST_PAD])
-    # When controller is disconnected, find_hid_instances returns empty
-    monkeypatch.setattr('gamepadstudio.hidhide.find_hid_instances', lambda *args: [])
-    ok, message = client.uncloak_controller(0x054C, 0x0CE6, device_path=None)
-    assert ok is True
-    assert hardware['blacklist'] == []
-    assert hardware['active'] is False
-
-
-def test_uncloak_already_visible_controller_returns_success(monkeypatch):
-    client, hardware = isolated_driver(monkeypatch, [])
-    monkeypatch.setattr('gamepadstudio.hidhide.find_hid_instances', lambda *args: [])
-    ok, message = client.uncloak_controller(0x054C, 0x0CE6)
-    assert ok is True
-    assert '未处于屏蔽状态' in message
-
-
-def test_cloaking_ui_emergency_uncloak_button_restores_all(tmp_path, monkeypatch):
-    from PySide6.QtWidgets import QApplication
-    from gamepadstudio.virtual_kbm_ui import VirtualKbmPage
-    from tests.mapping_fixtures import MappingOwner
-    app = QApplication.instance() or QApplication([])
-    owner = MappingOwner(tmp_path)
-    owner.snapshot = None
-    monkeypatch.setattr(owner, 'setting', lambda k, v: owner.store.set_setting(k, v, owner.snapshot))
-
-    monkeypatch.setattr(HidHideClient, 'is_driver_installed', lambda self: True)
-    monkeypatch.setattr(HidHideClient, 'is_active', lambda self: True)
-    monkeypatch.setattr(HidHideClient, 'get_blacklist', lambda self: [FIRST_PAD])
-    uncloak_all_called = []
-    monkeypatch.setattr(HidHideClient, 'uncloak_all_controllers',
-                        lambda self: (uncloak_all_called.append(True) or (True, '已恢复所有手柄共享访问，驱动过滤已关闭')))
-
-    try:
-        page = VirtualKbmPage(owner, store=owner.store)
-        page.open_cloaking()
-        assert hasattr(page, 'btn_uncloak_all')
-        assert page.btn_uncloak_all.isEnabled() is True
-        assert '驱动屏蔽已激活' in page.cloaking_status_label.text()
-
-        page.btn_uncloak_all.click()
-        assert len(uncloak_all_called) == 1
-        assert owner.store.settings_for(None)['device_cloaking_enabled'] is False
-        assert '已恢复所有手柄共享访问' in page.cloaking_status_label.text()
-    finally:
-        owner.close()
-
-
-def test_agent_restore_device_access_uncloaks_on_windows(monkeypatch):
-    from gamepadstudio import agent as agent_module
-    from types import SimpleNamespace
-    win_sys = SimpleNamespace(**vars(sys))
-    win_sys.platform = 'win32'
-    monkeypatch.setattr(agent_module, 'sys', win_sys)
-
-    uncloaked = []
-    fake_client = MagicMock()
-    fake_client.is_driver_installed.return_value = True
-    fake_client.get_blacklist.return_value = []
-    fake_client.uncloak_controller.side_effect = lambda v, p, **kw: (uncloaked.append((v, p, kw)) or (True, 'ok'))
-
-    class DummyDevice:
+def no_native_access(monkeypatch):
+    """这个文件只测纯逻辑与探测分支，任何真实句柄都不许出现。"""
+    monkeypatch.setattr(hidhide, 'win32_kernel32', lambda: None)
+    monkeypatch.setattr(hidhide, 'running_hidhide_clients', lambda: [])
+
+
+# ── MULTI_SZ 编解码 ────────────────────────────────────────────────
+def test_multi_sz_roundtrip_including_unicode():
+    items = [r'C:\Program Files\Nefarius\app.exe', r'D:\无限暖暖\game.exe',
+             r'HID\VID_054C&PID_0CE6\7&123456&0&0000']
+    assert decode_list(encode_multi_sz(items)) == items
+
+
+def test_empty_list_encodes_with_double_terminator():
+    assert encode_multi_sz([]) == b'\x00\x00\x00\x00'
+
+
+def test_empty_blacklist_from_driver_is_not_a_read_failure():
+    """驱动对空列表只回一个结束符；把它判成“读失败”会让所有写入被拒。"""
+    assert decode_list(b'\x00\x00') == []
+    assert decode_list(b'\x00\x00\x00\x00') == []
+
+
+@pytest.mark.parametrize('payload', [None, b'', b'\x00', b'\x00\x00\x01'])
+def test_unusable_payloads_are_reported_as_failure(payload):
+    assert decode_list(payload) is None
+
+
+def test_odd_length_payload_is_not_decoded():
+    assert decode_list(b'\x00') is None
+
+
+# ── 路径与条目比较 ─────────────────────────────────────────────────
+def test_same_paths_ignores_case_and_order():
+    assert same_paths([r'HID\VID_045E\a'], [r'hid\vid_045e\A'])
+    assert not same_paths([r'HID\a'], [r'HID\a', r'HID\b'])
+
+
+def test_dos_to_nt_path_passthrough_on_failure(monkeypatch):
+    monkeypatch.setattr(hidhide, 'sys', SimpleNamespace(platform='darwin'))
+    assert dos_to_nt_path(r'C:\a\b.exe') == r'C:\a\b.exe'
+
+
+def test_self_app_paths_only_returns_existing_files(monkeypatch, tmp_path):
+    monkeypatch.setattr(hidhide, 'sys', SimpleNamespace(platform='win32',
+                                                        executable=str(tmp_path / 'missing.exe'),
+                                                        _base_executable='', frozen=False))
+    assert hidhide.self_app_paths() == []
+
+
+def test_self_app_paths_uses_nt_form(monkeypatch, tmp_path):
+    real = tmp_path / 'GamePadStudio.exe'
+    real.write_bytes(b'MZ')
+    monkeypatch.setattr(hidhide, 'sys', SimpleNamespace(platform='win32', executable=str(real),
+                                                       _base_executable='', frozen=True))
+    monkeypatch.setattr(hidhide, 'dos_to_nt_path',
+                        lambda path: path.replace(str(tmp_path), '\\Device\\HarddiskVolume9\\App'))
+    paths = hidhide.self_app_paths()
+    assert paths and all(item.startswith('\\Device\\') for item in paths)
+
+
+# ── 占用提示 ───────────────────────────────────────────────────────
+def test_occupied_reason_names_known_holders(monkeypatch):
+    monkeypatch.setattr(hidhide, 'running_hidhide_clients', lambda: ['HidHideClient.exe'])
+    assert 'HidHideClient.exe' in occupied_reason()
+
+
+def test_occupied_reason_without_known_holder_still_explains(monkeypatch):
+    monkeypatch.setattr(hidhide, 'running_hidhide_clients', lambda: [])
+    text = occupied_reason()
+    assert '占用' in text and '刷新' in text
+
+
+def test_win_error_text_includes_the_code():
+    assert 'win32=5' in win_error_text(5)
+    assert win_error_text(0) == ''
+
+
+# ── 会话：不做抢占重试，读失败绝不写 ──────────────────────────────
+def test_session_open_fails_without_kernel32():
+    session = HidHideSession()
+    assert session.open() is False
+    assert session.error
+
+
+def test_session_read_reports_not_loaded(monkeypatch):
+    session = HidHideSession()
+    monkeypatch.setattr(session, 'open', lambda: False)
+    session.error = '无法打开设备隐身驱动。'
+    state = session.read()
+    assert state.loaded is False and state.error
+
+
+def test_apply_refuses_when_device_is_closed(monkeypatch):
+    session = HidHideSession()
+    monkeypatch.setattr(session, 'open', lambda: False)
+    session.error = 'busy'
+    result = session.apply(Change(active=True))
+    assert result.ok is False and result.message == 'busy'
+
+
+def test_transact_never_writes_after_a_failed_read(monkeypatch):
+    calls = []
+
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return HidHideState(loaded=False, error='读不到')
+
+        def apply(self, change):
+            calls.append(change)
+            return hidhide.Operation(True)
+
+    monkeypatch.setattr(hidhide, 'HidHideSession', lambda *a, **k: Session())
+    result = hidhide.transact(lambda state: Change(blacklist=()))
+    assert result.ok is False and result.message == '读不到'
+    assert calls == []
+
+
+def test_transact_without_change_reports_success(monkeypatch):
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return HidHideState(loaded=True, active=True, whitelist=('a',), blacklist=('b',))
+
+    monkeypatch.setattr(hidhide, 'HidHideSession', lambda *a, **k: Session())
+    result = hidhide.transact(lambda state: None)
+    assert result.ok is True and result.state.active is True
+
+
+# ── 驱动探测分层 ───────────────────────────────────────────────────
+def test_driver_info_without_registry_or_kernel32(monkeypatch):
+    monkeypatch.setattr(hidhide, 'sys', SimpleNamespace(platform='win32'))
+    monkeypatch.setattr(hidhide, 'winreg', None)
+    monkeypatch.setattr(hidhide.os.path, 'isfile', lambda path: False)
+    monkeypatch.setattr(hidhide, '_service_state', lambda name: '')
+    monkeypatch.setattr(hidhide, '_file_version', lambda path: '')
+
+    class Closed:
         def __init__(self):
-            self.closed = False
-        def close(self):
-            self.closed = True
+            self._handle = None
+            self.occupied = False
+            self.error = '未检测到运行中的设备隐身驱动。'
 
-    dummy_dev = DummyDevice()
-    dummy_agent = SimpleNamespace(
-        state={'vendor': 0x054C, 'product': 0x0CE6, 'device_path': FIRST_PATH},
-        _cloaked_devices={(0x054C, 0x0CE6, FIRST_PATH)},
-        device=dummy_dev,
-        log=MagicMock(),
-    )
+        def __enter__(self):
+            return self
 
-    with patch('gamepadstudio.hidhide.HidHideClient', return_value=fake_client):
-        agent_module.Agent._restore_device_access(dummy_agent)
+        def __exit__(self, *exc):
+            return False
 
-    assert dummy_dev.closed is True
-    assert (0x054C, 0x0CE6, {'device_path': FIRST_PATH}) in uncloaked
-    assert len(dummy_agent._cloaked_devices) == 0
-    fake_client.set_active.assert_called_with(False)
+    monkeypatch.setattr(hidhide, 'HidHideSession', lambda *a, **k: Closed())
+    info = hidhide.driver_info()
+    assert isinstance(info, DriverInfo)
+    assert info.installed is False and info.loaded is False
 
 
-def test_studio_restore_device_access_uncloaks_in_standalone(monkeypatch):
-    from gamepadstudio import studio as studio_module
-    from types import SimpleNamespace
-    win_sys = SimpleNamespace(**vars(sys))
-    win_sys.platform = 'win32'
-    monkeypatch.setattr(studio_module, 'sys', win_sys)
+def test_driver_info_reports_occupied_as_not_loaded(monkeypatch):
+    monkeypatch.setattr(hidhide, 'sys', SimpleNamespace(platform='win32'))
+    monkeypatch.setattr(hidhide, '_package_registration',
+                        lambda: {'package_version': '1.5.230', 'install_path': 'C:\\x'})
+    monkeypatch.setattr(hidhide, '_reg_value', lambda *a: '\\SystemRoot\\x.sys')
+    monkeypatch.setattr(hidhide, '_service_state', lambda name: 'running')
+    monkeypatch.setattr(hidhide, '_file_version', lambda path: '1.4.181.0')
 
-    uncloaked = []
-    fake_client = MagicMock()
-    fake_client.is_driver_installed.return_value = True
-    fake_client.get_blacklist.return_value = []
-    fake_client.uncloak_controller.side_effect = lambda v, p, **kw: (uncloaked.append((v, p, kw)) or (True, 'ok'))
-
-    class DummyDevice:
+    class Session:
         def __init__(self):
-            self.closed = False
-        def close(self):
-            self.closed = True
+            self._handle = None
+            self.occupied = True
+            self.error = 'busy'
 
-    dummy_dev = DummyDevice()
-    dummy_studio = SimpleNamespace(
-        remote=False,
-        snapshot={'vendor': 0x054C, 'product': 0x0CE6, 'device_path': FIRST_PATH},
-        _cloaked_devices={(0x054C, 0x0CE6, FIRST_PATH)},
-        device=dummy_dev,
-    )
+        def __enter__(self):
+            return self
 
-    with patch('gamepadstudio.hidhide.HidHideClient', return_value=fake_client):
-        studio_module.Studio._restore_device_access(dummy_studio)
+        def __exit__(self, *exc):
+            return False
 
-    assert dummy_dev.closed is True
-    assert (0x054C, 0x0CE6, {'device_path': FIRST_PATH}) in uncloaked
-    assert len(dummy_studio._cloaked_devices) == 0
-    fake_client.set_active.assert_called_with(False)
+    monkeypatch.setattr(hidhide, 'HidHideSession', lambda *a, **k: Session())
+    info = hidhide.driver_info()
+    assert info.installed is True and info.loaded is False and info.occupied is True
 
 
-def test_entry_uncloak_all_cli(monkeypatch, capsys):
-    from gamepadstudio import entry
-    import json
-    uncloak_called = []
-    fake_client = MagicMock()
-    fake_client.uncloak_all_controllers.return_value = (True, '已恢复所有手柄共享访问，驱动过滤已关闭')
+def test_ready_property_needs_both_installed_and_loaded():
+    assert DriverInfo(installed=True, loaded=True).ready is True
+    assert DriverInfo(installed=True, loaded=False).ready is False
 
-    with patch('gamepadstudio.hidhide.HidHideClient', return_value=fake_client), \
-         patch.object(sys, 'argv', ['GamePadStudio', '--uncloak-all']):
-        ret = entry.run()
-        assert ret == 0
-        captured = capsys.readouterr()
-        data = json.loads(captured.out)
-        assert data['ok'] is True
-        assert '已恢复所有手柄共享访问' in data['message']
+
+# ── 安装入口的安全边界（不实际提权） ──────────────────────────────
+def test_install_refuses_bootcamp(monkeypatch):
+    monkeypatch.setattr(hidhide, 'sys', SimpleNamespace(platform='win32'))
+    monkeypatch.setattr(hidhide, 'is_apple_bootcamp_environment', lambda: True)
+    result = hidhide.install_driver()
+    assert result.ok is False and 'Boot Camp' in result.message
+
+
+def test_install_refuses_hash_mismatch(monkeypatch, tmp_path):
+    monkeypatch.setattr(hidhide, 'sys', SimpleNamespace(platform='win32'))
+    monkeypatch.setattr(hidhide, 'is_apple_bootcamp_environment', lambda: False)
+    fake = tmp_path / 'HidHide.exe'
+    fake.write_bytes(b'not the official package')
+    monkeypatch.setattr(hidhide, 'bundled_installer', lambda: str(fake))
+    result = hidhide.install_driver()
+    assert result.ok is False and 'SHA-256' in result.message
+
+
+def test_install_reports_reboot_required(monkeypatch):
+    monkeypatch.setattr(hidhide, 'sys', SimpleNamespace(platform='win32'))
+    monkeypatch.setattr(hidhide, 'is_apple_bootcamp_environment', lambda: False)
+    monkeypatch.setattr(hidhide, 'bundled_installer', lambda: 'C:\\setup.exe')
+    monkeypatch.setattr(hidhide, '_sha256', lambda path: hidhide.INSTALLER_SHA256)
+    monkeypatch.setattr(hidhide, '_run_elevated_wait', lambda program, arguments: 3010)
+    result = hidhide.install_driver()
+    assert result.ok is True and result.reboot_required is True
+
+
+def test_cancelled_elevation_is_not_a_silent_failure(monkeypatch):
+    monkeypatch.setattr(hidhide, 'sys', SimpleNamespace(platform='win32'))
+    monkeypatch.setattr(hidhide, 'is_apple_bootcamp_environment', lambda: False)
+    monkeypatch.setattr(hidhide, 'bundled_installer', lambda: 'C:\\setup.exe')
+    monkeypatch.setattr(hidhide, '_sha256', lambda path: hidhide.INSTALLER_SHA256)
+    monkeypatch.setattr(hidhide, '_run_elevated_wait', lambda program, arguments: 1223)
+    result = hidhide.install_driver()
+    assert result.ok is False and result.cancelled is True
+
+
+def test_installer_is_bundled_and_hashed():
+    path = hidhide.bundled_installer()
+    assert path, '官方安装包必须随包发布，否则一键安装不可用'
+    assert hidhide._sha256(path) == hidhide.INSTALLER_SHA256
