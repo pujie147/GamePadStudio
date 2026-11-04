@@ -467,3 +467,135 @@ def test_panel_install_button_switches_between_install_and_repair():
     assert fresh.btn_driver.text() == '一键安装驱动'
     repair = HidHidePanel(owner_for({'snapshot': installed_only}))
     assert '修复' in repair.btn_driver.text()
+
+
+# ── 设备来源判定：下面全是本机实测抓下来的注册表值 ───────────────────
+VIEM_HID = r'HID\VID_045E&PID_028E&IG_00\3&34f4d81e&0&0000'
+VIEM_XUSB = r'USB\VID_045E&PID_028E&IG_00\2&DEE0F28&1&00'
+VIEM_CONTAINER = r'USB\VID_045E&PID_028E\01'
+VIEM_ROOT = r'ROOT\SYSTEM\0001'
+HC_KBD = r'HID\HID_DEVICE_SYSTEM_VHF&Col01\2&88d67f4&0&0000'
+HC_VHF = r'VHF\HID_DEVICE_SYSTEM_VHF\1&1A590E2C&0&{6225EBE9-31D6-5366-AB1A-2AF1FDD27999}'
+HC_ROOT = r'ROOT\SYSTEM\0002'
+BT_KBD = r'HID\{00001124-0000-1000-8000-00805f9b34fb}_VID&00020a5c_PID&8502&Col01\8&140e5071&0&0000'
+BT_ENUM = r'BTHENUM\{00001124-0000-1000-8000-00805F9B34FB}_VID&00020A5C_PID&8502\7&935ECBD&0&0018003EE5CC_C00000000'
+BT_RADIO = r'USB\VID_33FA&PID_0001\5&2EC8F72A&0&2'
+LOOKALIKE = r'USB\VID_1234&PID_5678\0'
+
+REGISTRY = {
+    VIEM_ROOT: {'Service': ('ViGEmBus',), 'HardwareID': (r'Nefarius\ViGEmBus\Gen1',),
+                'DeviceDesc': '@oem53.inf,%vigembus.devicedesc%;Nefarius Virtual Gamepad Emulation Bus'},
+    VIEM_CONTAINER: {'Service': ('xusb22',), 'HardwareID': (r'USB\VID_045E&PID_028E',),
+                     'DeviceDesc': '@xusb22.inf,%xusb22.devicename.wired%;Xbox 360 Controller for Windows'},
+    HC_ROOT: {'Service': ('uuycinput',), 'HardwareID': (r'netease\uuycinput',),
+              'DeviceDesc': '@oem51.inf,%devicedesc%;UUYCInput HID'},
+    HC_VHF: {'Service': ('mshidkmdf',),
+             'HardwareID': ('HID_DEVICE_SYSTEM_VHF', r'VHF\VID_5E2A&PID_71B4')},
+    # 描述里写满 ViGEm，Service/HardwareID 干净 —— 它就不是 ViGEm 的
+    LOOKALIKE: {'Service': ('somegamepad',), 'HardwareID': (r'USB\VID_1234&PID_5678',),
+                'DeviceDesc': '@oem99.inf,%vigembus.devicedesc%;ViGEm lookalike'},
+}
+CHAINS = {VIEM_HID: [VIEM_XUSB, VIEM_CONTAINER, VIEM_ROOT, 'HTREE\\ROOT\\0'],
+          HC_KBD: [HC_VHF, HC_ROOT, 'HTREE\\ROOT\\0'],
+          BT_KBD: [BT_ENUM, r'BTH\MS_BTHBRB\6&F7CA2CA&0&1', BT_RADIO, r'USB\ROOT_HUB30\4&2FBF7A17&0&0'],
+          LOOKALIKE: [r'USB\ROOT_HUB30\4&2FBF7A17&0&0']}
+
+
+@pytest.fixture
+def real_registry(monkeypatch):
+    monkeypatch.setattr(hidhide_devices, '_multi_value',
+                        lambda instance, name: REGISTRY.get(instance, {}).get(name, ()))
+    monkeypatch.setattr(hidhide_devices, 'ancestors',
+                        lambda instance, limit=6: list(CHAINS.get(instance, [])))
+
+
+def test_vigem_pad_is_identified_by_its_bus_service(real_registry):
+    origin, detail = hidhide_devices.classify_origin(VIEM_HID)
+    assert origin == hidhide_devices.ORIGIN_VIGEM
+    assert detail == f'Service=ViGEmBus @ {VIEM_ROOT}'
+
+
+def test_other_tools_vhf_device_is_virtual_and_not_claimed(real_registry):
+    origin, detail = hidhide_devices.classify_origin(HC_KBD)
+    assert origin == hidhide_devices.ORIGIN_VHF
+    assert 'HID_DEVICE_SYSTEM_VHF' in detail
+
+
+def test_real_devices_stay_physical(real_registry):
+    assert hidhide_devices.classify_origin(BT_KBD)[0] == hidhide_devices.ORIGIN_PHYSICAL
+
+
+def test_localized_description_mentioning_vigem_does_not_fool_the_check(real_registry):
+    """DeviceDesc 是 MUI 间接串，随系统语言变；驱动自定义 INF 还能随便写。"""
+    assert hidhide_devices.classify_origin(LOOKALIKE)[0] == hidhide_devices.ORIGIN_PHYSICAL
+
+
+def test_ancestors_walk_phantom_nodes(monkeypatch):
+    """手柄拔掉以后仍要认得出是谁的虚拟设备：NORMAL 定位对不在场的节点直接失败，链子会断。"""
+    seen = []
+    monkeypatch.setattr(hidhide_devices, '_prepare', lambda: (None, object(), None))
+
+    def fake_parent(cm, instance, flags=0):
+        seen.append(flags)
+        return {'a': 'b', 'b': 'c'}.get(instance, '')
+
+    monkeypatch.setattr(hidhide_devices, 'parent_of', fake_parent)
+    assert hidhide_devices.ancestors('a') == ['b', 'c']
+    assert seen == [hidhide_devices.CM_LOCATE_DEVNODE_PHANTOM] * 3   # 含最后一次走到空为止
+
+
+def synthetic_group(key, name, origin, detail):
+    interface = hidhide_devices.HidInterface(instance_id=key + '\\C1', present=True)
+    return hidhide_devices.DeviceGroup(key=key, name=name, interfaces=(interface,),
+                                       base_container=key, base_class='xnacomposite',
+                                       origin=origin, origin_detail=detail)
+
+
+def test_snapshot_carries_origin_and_ownership(isolated, monkeypatch):
+    driver = FakeDriver(current=state())
+    isolated.setattr(hidhide, 'HidHideSession', driver.session)
+    ours = synthetic_group(VIEM_CONTAINER, 'Controller (XBOX 360 For Windows)', 'vigem',
+                           f'Service=ViGEmBus @ {VIEM_ROOT}')
+    foreign = synthetic_group(HC_VHF, 'HID Keyboard Device', 'vhf', 'HardwareID=HID_DEVICE_SYSTEM_VHF')
+    monkeypatch.setattr(hidhide_devices, 'enumerate_groups', lambda: [ours, foreign])
+    rows = {row['key']: row for row in
+            control.HidHideController(own_keys=lambda: (ours.key,)).snapshot()['devices']}
+    assert rows[VIEM_CONTAINER]['created_by_us'] is True
+    assert rows[VIEM_CONTAINER]['origin_detail'].startswith('Service=ViGEmBus')
+    assert rows[HC_VHF]['created_by_us'] is False
+
+
+def test_ownership_provider_failure_degrades_to_no_badge(isolated, monkeypatch):
+    driver = FakeDriver(current=state())
+    isolated.setattr(hidhide, 'HidHideSession', driver.session)
+    monkeypatch.setattr(hidhide_devices, 'enumerate_groups',
+                        lambda: [synthetic_group(VIEM_CONTAINER, 'Pad', 'vigem', '')])
+
+    def boom():
+        raise RuntimeError('拿不到持有者')
+
+    rows = {row['key']: row for row in
+            control.HidHideController(own_keys=boom).snapshot()['devices']}
+    assert rows[VIEM_CONTAINER]['created_by_us'] is False
+
+
+def test_panel_badges_the_origin_and_ownership(monkeypatch):
+    def row(key, name, origin, created, detail):
+        return {'key': key, 'name': name, 'vid_pid': '', 'connected': True, 'gaming': True,
+                'hidden': False, 'partly_hidden': False, 'owned': False,
+                'base_container': key, 'base_class': 'xnacomposite', 'origin': origin,
+                'origin_detail': detail, 'created_by_us': created, 'interfaces': []}
+
+    snapshot = dict(BASE_SNAPSHOT, devices=[
+        row(VIEM_CONTAINER, 'Our Pad', 'vigem', True, f'Service=ViGEmBus @ {VIEM_ROOT}'),
+        row(HC_VHF, 'Other Virtual', 'vhf', False, 'HardwareID=HID_DEVICE_SYSTEM_VHF'),
+        row(BT_RADIO, 'Real Pad', 'physical', False, '')])
+    panel, owner = panel_for(monkeypatch, snapshot)
+    panel.fill_devices()
+    texts = [panel.tree.topLevelItem(index).text(0)
+             for index in range(panel.tree.topLevelItemCount())]
+    assert 'Our Pad  ·  本程序创建' in texts
+    assert 'Other Virtual  ·  虚拟设备 · VHF' in texts
+    assert 'Real Pad' in texts
+    tooltip = panel.tree.topLevelItem(0).toolTip(0)
+    assert '判定依据' in tooltip and 'Service=ViGEmBus' in tooltip

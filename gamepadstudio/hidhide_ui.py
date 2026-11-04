@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (QCheckBox, QDialog, QFileDialog, QHBoxLayout, QHe
 
 from .glass import TOKENS, Toggle
 from .i18n import tr
+from . import hidhide_devices
 
 HIDHIDE_RELEASE_URL = 'https://github.com/nefarius/HidHide/releases/latest'
 
@@ -149,7 +150,7 @@ class HidHidePanel(QDialog):
             devices_bar.addWidget(control)
         devices_bar.addStretch(1)
         devices_page.box.addLayout(devices_bar)
-        self.devices_hint = label(tr('勾选整行会隐藏该物理设备的整套 HID 节点（含 XInput 通道）。'), 'caption', True)
+        self.devices_hint = label(tr('勾选整行会隐藏该设备的整套 HID 节点（含 XInput 通道）；物理与虚拟设备一样受控。'), 'caption', True)
         self.devices_hint.setStyleSheet(f"color: {TOKENS['ink_3']};")
         devices_page.box.addWidget(self.devices_hint)
         self.tree = QTreeWidget()
@@ -306,12 +307,19 @@ class HidHidePanel(QDialog):
         self.refresh()
 
     # ── 设备页 ──────────────────────────────────────────────────────
+    @staticmethod
+    def origin_badges():
+        # 本程序创建的由 created_by_us 单独覆盖；这里只标驱动血统，不做归属断言。
+        return {hidhide_devices.ORIGIN_VIGEM: tr('虚拟手柄 · ViGEmBus'),
+                hidhide_devices.ORIGIN_VHF: tr('虚拟设备 · VHF')}
+
     def fill_devices(self):
         self.tree.blockSignals(True)
         self.tree.clear()
         groups = self.data.get('devices') or []
         gaming_only = self.filter_gaming.isChecked()
         hide_absent = self.filter_present.isChecked()
+        badges = self.origin_badges()
         shown = 0
         for group in groups:
             if gaming_only and not group['gaming']:
@@ -319,11 +327,17 @@ class HidHidePanel(QDialog):
             if hide_absent and not group['connected']:
                 continue
             shown += 1
-            title = f'{group["name"]}'
+            badge = (tr('本程序创建') if group.get('created_by_us')
+                     else badges.get(group.get('origin', ''), ''))
+            title = f'{group["name"]}  ·  {badge}' if badge else f'{group["name"]}'
             parent = QTreeWidgetItem([title,
                                       tr('已连接') if group['connected'] else tr('已断开'),
                                       group['vid_pid']])
             parent.setData(0, GROUP_ROLE, group)
+            if badge:
+                detail = group.get('origin_detail') or ''
+                parent.setToolTip(0, f'{tr("来源")}：{badge}'
+                                   + (f'\n{tr("判定依据")}：{detail}' if detail else ''))
             parent.setFlags(parent.flags() | Qt.ItemIsUserCheckable)
             if group['hidden']:
                 parent.setCheckState(0, Qt.Checked)

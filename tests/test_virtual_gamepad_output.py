@@ -401,3 +401,27 @@ def test_no_physical_controller_is_assumed(tmp_path, monkeypatch):
         assert len(holders) == 1, 'the signature pad count is %s - output is ambiguous' % holders
     finally:
         pad.close()
+
+
+def test_ownership_is_a_creation_diff_and_never_a_guess(monkeypatch):
+    """别的工具也走 ViGEmBus，所以"这颗是我们的"只能来自创建前后的差集。"""
+    created = vx.VirtualXInputPad()
+    created._connected = True
+    created._pre_create_keys = frozenset({'OTHER-TOOL-PAD'})
+    monkeypatch.setattr(vx, '_vigem_group_keys', lambda: frozenset({'OTHER-TOOL-PAD'}))
+    assert created.own_group_keys() == (), 'nothing new appeared, so nothing may be claimed'
+    monkeypatch.setattr(vx, '_vigem_group_keys', lambda: frozenset({'OTHER-TOOL-PAD', 'OURS'}))
+    assert created.own_group_keys() == ('OURS',)
+
+
+def test_created_pad_reports_its_own_device_group(pad):
+    """真机：我们刚造的那颗必须能在设备目录里被点名，而且来源确实是 ViGEmBus。"""
+    if sys.platform != 'win32':
+        pytest.skip('device ancestry is a Windows concept')
+    keys = pad.own_group_keys()
+    assert keys, 'the pad we just created must be attributable to us'
+    from gamepadstudio import hidhide_devices
+    groups = {group.key: group for group in hidhide_devices.enumerate_groups()}
+    for key in keys:
+        assert key in groups, '%s is not in the device catalog' % key
+        assert groups[key].origin == hidhide_devices.ORIGIN_VIGEM, groups[key].origin_detail

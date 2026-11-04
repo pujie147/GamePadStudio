@@ -123,10 +123,15 @@ class Agent(QObject):
         # 避免后台与 HidHide 配置界面互相抢独占句柄。见 hidhide_control.py。
         return
 
+    def hidhide_created_keys(self):
+        """只读已存在的 pad —— 为了贴标签而去新建一颗虚拟手柄是本末倒置。"""
+        pad = getattr(self.actions, 'virtual_pad', None)
+        return pad.own_group_keys() if pad is not None else ()
+
     def hidhide_controller(self):
         if not hasattr(self, '_hidhide_controller'):
             from .hidhide_control import HidHideController
-            self._hidhide_controller = HidHideController(self.store)
+            self._hidhide_controller = HidHideController(self.store, own_keys=self.hidhide_created_keys)
         return self._hidhide_controller
 
     def apply_device_settings(self):

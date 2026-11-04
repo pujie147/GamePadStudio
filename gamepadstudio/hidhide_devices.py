@@ -29,6 +29,7 @@ ERROR_ACCESS_DENIED = 5
 ERROR_SHARING_VIOLATION = 32
 CR_SUCCESS = 0
 CM_LOCATE_DEVNODE_NORMAL = 0x00000000
+CM_LOCATE_DEVNODE_PHANTOM = 0x00000001
 CM_GET_DEVICE_INTERFACE_LIST_PRESENT = 0x00000000
 CM_GET_DEVICE_INTERFACE_LIST_ALL_DEVICES = 0x00000001
 HIDP_STATUS_SUCCESS = 0x00110000
@@ -36,6 +37,10 @@ HIDP_STATUS_SUCCESS = 0x00110000
 # XInput 由这两个复合驱动类承载；HidHide 的 upper filter 也挂在它们上面。
 XINPUT_CLASSES = ('xnacomposite', 'xboxcomposite')
 BLOCKABLE_CONTAINER_CLASSES = ('hidclass',) + XINPUT_CLASSES
+
+ORIGIN_PHYSICAL = 'physical'
+ORIGIN_VIGEM = 'vigem'
+ORIGIN_VHF = 'vhf'
 _HID_STRING_CHARS = 127
 _INVALID_HANDLE = C.c_void_p(-1).value
 
@@ -182,6 +187,8 @@ class DeviceGroup:
     base_class: str = ''
     base_class_guid: str = ''
     child_count: int = 0
+    origin: str = ORIGIN_PHYSICAL
+    origin_detail: str = ''
 
     @property
     def vendor_id(self) -> int:
@@ -260,10 +267,10 @@ def _reg_class_value(class_guid: str, value: str) -> str:
         return ''
 
 
-def _locate(cm, instance_id: str):
+def _locate(cm, instance_id: str, flags: int = CM_LOCATE_DEVNODE_NORMAL):
     node = W.DWORD(0)
     buffer = C.create_unicode_buffer(instance_id)
-    if cm is None or cm.CM_Locate_DevNodeW(C.byref(node), buffer, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS:
+    if cm is None or cm.CM_Locate_DevNodeW(C.byref(node), buffer, flags) != CR_SUCCESS:
         return None
     return node.value
 
@@ -275,14 +282,72 @@ def _instance_of(cm, node) -> str:
     return buffer.value
 
 
-def parent_of(cm, instance_id: str) -> str:
-    node = _locate(cm, instance_id)
+def parent_of(cm, instance_id: str, flags: int = CM_LOCATE_DEVNODE_NORMAL) -> str:
+    node = _locate(cm, instance_id, flags)
     if node is None:
         return ''
     parent = W.DWORD(0)
     if cm.CM_Get_Parent(C.byref(parent), node, 0) != CR_SUCCESS:
         return ''
     return _instance_of(cm, parent.value)
+
+
+# 设备来源只认注册表里与显示语言无关的字段。DeviceDesc 是本地化的间接串
+# （`@oem53.inf,%vigembus.devicedesc%;…`），FriendlyName 更会被驱动自定义掉。
+VIGEM_SERVICES = ('vigembus',)
+VHF_HARDWARE_IDS = ('hid_device_system_vhf',)
+
+
+def _multi_value(instance_id: str, name: str) -> Tuple[str, ...]:
+    """REG_MULTI_SZ 读出的是列表，_enum_value 的 str() 会把方括号一起带进来。"""
+    if winreg is None or not instance_id:
+        return ()
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            f'SYSTEM\\CurrentControlSet\\Enum\\{instance_id}') as key:
+            value = winreg.QueryValueEx(key, name)[0]
+    except OSError:
+        return ()
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item) for item in value if item)
+    return (str(value),) if value else ()
+
+
+def ancestors(instance_id: str, limit: int = 6) -> List[str]:
+    """自下而上的祖先实例路径，包含已断开设备（phantom）。
+
+    拔掉手柄后徽标必须仍然认得出它是谁的虚拟设备，所以这里用 PHANTOM 定位；
+    CM_LOCATE_DEVNODE_NORMAL 对不在场的节点直接失败，链子当场断掉。
+    """
+    _, cm, _ = _prepare()
+    if cm is None:
+        return []
+    chain: List[str] = []
+    current = instance_id
+    for _ in range(limit):
+        parent = parent_of(cm, current, CM_LOCATE_DEVNODE_PHANTOM)
+        if not parent or parent in chain:
+            break
+        chain.append(parent)
+        current = parent
+    return chain
+
+
+def classify_origin(instance_id: str) -> Tuple[str, str]:
+    """(来源, 依据)。依据带上命中字段与所在节点，供悬浮提示直接引用证据。"""
+    for node in (instance_id, *ancestors(instance_id)):
+        services = _multi_value(node, 'Service')
+        hardware = _multi_value(node, 'HardwareID')
+        for service in services:
+            if service.lower() in VIGEM_SERVICES:
+                return ORIGIN_VIGEM, f'Service={service} @ {node}'
+        for hardware_id in hardware:
+            if 'vigembus' in hardware_id.lower():
+                return ORIGIN_VIGEM, f'HardwareID={hardware_id} @ {node}'
+        joined = ' '.join(hardware).lower()
+        if node.upper().startswith('VHF\\') or any(item in joined for item in VHF_HARDWARE_IDS):
+            return ORIGIN_VHF, f'HardwareID={hardware[0] if hardware else node} @ {node}'
+    return ORIGIN_PHYSICAL, ''
 
 
 def child_count(cm, instance_id: str) -> int:
@@ -449,9 +514,14 @@ def enumerate_groups() -> List[DeviceGroup]:
         buckets.setdefault(info.base_container or instance, []).append(info)
 
     groups: List[DeviceGroup] = []
+    origins: dict = {}
     for key, members in buckets.items():
         members.sort(key=lambda item: item.instance_id.upper())
         head = members[0]
+        root = head.base_container or head.instance_id
+        if root not in origins:
+            origins[root] = classify_origin(root)
+        origin, origin_detail = origins[root]
         words: List[str] = []
         for item in members:
             for token in re.split(r'\s+', ' '.join((item.manufacturer, item.product)).strip()):
@@ -460,7 +530,8 @@ def enumerate_groups() -> List[DeviceGroup]:
         groups.append(DeviceGroup(key=key, name=' '.join(words) or head.description or key,
                                   interfaces=tuple(members), base_container=head.base_container,
                                   base_class=head.base_class, base_class_guid=head.base_class_guid,
-                                  child_count=head.child_count))
+                                  child_count=head.child_count,
+                                  origin=origin, origin_detail=origin_detail))
     groups.sort(key=lambda group: (not group.connected, not group.gaming, group.name.lower()))
     return groups
 

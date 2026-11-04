@@ -2067,10 +2067,14 @@ class Studio(GlassWindow):
             divider.setVisible(visible)
 
     # ── 设备隐身 (HidHide)：界面不直接碰驱动，写操作统一交给后台 ──────────
+    def hidhide_created_keys(self):
+        pad = getattr(self.actions, 'virtual_pad', None)
+        return pad.own_group_keys() if pad is not None else ()
+
     def hidhide_controller(self):
         if not hasattr(self, '_hidhide_controller'):
             from .hidhide_control import HidHideController
-            self._hidhide_controller = HidHideController(self.store)
+            self._hidhide_controller = HidHideController(self.store, own_keys=self.hidhide_created_keys)
         return self._hidhide_controller
 
     def hidhide(self, action, **payload):

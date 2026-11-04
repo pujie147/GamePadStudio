@@ -1441,6 +1441,11 @@ TRANSLATIONS.update({
     '本程序': 'This app',
     '本程序添加': 'Added by this app',
     '外部程序': 'Other software',
+    '本程序创建': 'Created by this app',
+    '虚拟手柄 · ViGEmBus': 'Virtual pad · ViGEmBus',
+    '虚拟设备 · VHF': 'Virtual device · VHF',
+    '来源': 'Origin',
+    '判定依据': 'Evidence',
     '（文件不存在）': ' (file missing)',
     '安装状态': 'Installation',
     '驱动可访问': 'Driver reachable',
@@ -1464,8 +1469,9 @@ TRANSLATIONS.update({
     '一键恢复所有共享访问': 'Restore shared access for all devices',
     '列表中的程序仍能看到被隐藏的手柄。本程序会自动登记自身，否则开启隐身后我们自己就读不到手柄了。':
         'Apps on this list can still see the hidden controller. This app registers itself automatically, otherwise it would lose access too.',
-    '勾选整行会隐藏该物理设备的整套 HID 节点（含 XInput 通道）。':
-        'Ticking a row hides every HID node of that physical device, including its XInput path.',
+    '勾选整行会隐藏该设备的整套 HID 节点（含 XInput 通道）；物理与虚拟设备一样受控。':
+        'Ticking a row hides every HID node of that device, including its XInput path - '
+        'virtual devices are controlled exactly like physical ones.',
     '无法读取（可能被其他程序独占或本程序未被授权）':
         'Not readable (held exclusively by another app, or this app is not allowed)',
     '没有符合条件的设备。连接手柄后点「刷新」，或取消筛选查看已断开设备。':

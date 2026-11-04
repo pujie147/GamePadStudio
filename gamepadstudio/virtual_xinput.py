@@ -577,6 +577,21 @@ _NOTIFICATION_CB_TYPE = C.CFUNCTYPE(
 )
 
 
+def _vigem_group_keys() -> frozenset:
+    """当前在场的 ViGEmBus 虚拟手柄组 key（非 Windows 直接空集）。"""
+    if sys.platform != 'win32':
+        return frozenset()
+    try:
+        from . import hidhide_devices
+    except Exception:
+        return frozenset()
+    try:
+        return frozenset(group.key for group in hidhide_devices.enumerate_groups()
+                         if group.connected and group.origin == hidhide_devices.ORIGIN_VIGEM)
+    except Exception:
+        return frozenset()
+
+
 class VirtualXInputPad:
     """Manages a unified Virtual XInput / HID controller across Windows (`ViGEmClient`) and macOS (`Darwin` IPC/Bridge)."""
 
@@ -598,6 +613,8 @@ class VirtualXInputPad:
         self._frame_callbacks: list[Callable[[dict[str, Any], dict[str, Any]], None]] = []
         self._c_notification_cb = None
         self.last_error: Optional[str] = None
+        self._own_group_keys: tuple = ()
+        self._pre_create_keys: frozenset = frozenset()
         self.last_report: dict[str, Any] = compose_xusb_report()[1]
         self.last_hid_report: dict[str, Any] = compose_hid_gamepad_report()[1]
 
@@ -636,6 +653,19 @@ class VirtualXInputPad:
     def is_connected(self) -> bool:
         return bool(self._connected and ((self._client and self._target) or self._sock is not None))
 
+    def own_group_keys(self) -> tuple:
+        """本程序创建的那颗虚拟手柄在设备目录里的组 key。
+
+        差集要等 xusb22 绑定完才有结果，所以每次询问都重算一次；宁可暂时没有徽标，
+        也不把别的工具的 ViGEm 手柄说成是我们创建的。
+        """
+        if not self._connected:
+            return ()
+        fresh = tuple(sorted(_vigem_group_keys() - self._pre_create_keys))
+        if fresh:
+            self._own_group_keys = fresh
+        return self._own_group_keys
+
     def connect(self) -> bool:
         if self.is_connected:
             return True
@@ -667,6 +697,8 @@ class VirtualXInputPad:
                 lib.vigem_disconnect(client)
                 lib.vigem_free(client)
                 return False
+            # 归属只能在创建那一刻取差集：别的工具也走 ViGEmBus，事后无从区分。
+            self._pre_create_keys = _vigem_group_keys()
             err = lib.vigem_target_add(client, target)
             if err != VIGEM_ERROR_NONE:
                 self.last_error = 'vigem_target_add: ' + vigem_error_name(err)
@@ -678,6 +710,7 @@ class VirtualXInputPad:
             self._client = client
             self._target = target
             self._connected = True
+            self._own_group_keys = tuple(sorted(_vigem_group_keys() - self._pre_create_keys))
             self._prime_neutral_report()
             if self._rumble_callback is not None:
                 self._bind_notification()
@@ -795,6 +828,8 @@ class VirtualXInputPad:
         return self.emit_frame(buttons=(), axes=())
 
     def close(self) -> None:
+        self._own_group_keys = ()
+        self._pre_create_keys = frozenset()
         try:
             if self.is_connected:
                 self.reset()

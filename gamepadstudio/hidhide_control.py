@@ -63,8 +63,10 @@ class AppEntry:
 
 
 class HidHideController:
-    def __init__(self, store=None):
+    def __init__(self, store=None, own_keys=None):
         self.store = store
+        # 谁创建了当前在场的虚拟手柄，只有持有 pad 的那一侧知道（Agent/UI 主进程）。
+        self._own_keys_provider = own_keys
 
     # ── 配置中的“本程序管理”集合 ────────────────────────────────────
     def _setting(self, key: str, default):
@@ -135,6 +137,19 @@ class HidHideController:
                 'managed': {'paths': self.managed_paths(), 'apps': self.managed_apps()},
                 'reconcile': self.assess(info, state, prune=True)}
 
+    def created_group_keys(self) -> set:
+        """本程序此刻创建的虚拟手柄所属设备组（大写 key 集合）。
+
+        没有 provider（例如远控模式下由另一侧持有 pad）就返回空集 —— 宁可少标。
+        """
+        provider = self._own_keys_provider
+        if provider is None:
+            return set()
+        try:
+            return {str(item).upper() for item in (provider() or ()) if item}
+        except Exception:
+            return set()
+
     def snapshot(self) -> Dict[str, object]:
         info = hidhide.driver_info()
         state = hidhide.read_state()
@@ -152,6 +167,7 @@ class HidHideController:
                 apps.append(self._app_entry(path, self_paths, managed_apps, registered=False))
 
         device_rows = []
+        own_keys = self.created_group_keys()
         for group in groups:
             paths = hidhide_devices.hide_paths_for(group, tuple(item.instance_id for item in group.interfaces))
             device_rows.append({
@@ -160,6 +176,10 @@ class HidHideController:
                 'vid_pid': group.vid_pid_text(),
                 'connected': group.connected,
                 'gaming': group.gaming,
+                'origin': group.origin,
+                'origin_detail': group.origin_detail,
+                # owned=黑名单里我们写的条目；created_by_us=设备是本程序拉起的虚拟手柄
+                'created_by_us': group.key.upper() in own_keys,
                 'hidden': bool(paths) and all(item.upper() in hidden for item in paths),
                 'partly_hidden': any(item.upper() in hidden for item in paths) and not all(
                     item.upper() in hidden for item in paths),
