@@ -9,7 +9,8 @@ from pathlib import Path
 import tempfile
 
 from .controller_catalog import CATALOG
-from .mapping_engine import GAMEPAD_TARGETS, canonical_trigger, input_sources, validate_mappings
+from .mapping_engine import (GAMEPAD_TARGETS, MOUSE_DIRECTIONS, STICK_DIRECTIONS,
+                             canonical_trigger, input_sources, validate_mappings)
 from .schema_registry import (
     GYRO_TRIGGERS,
     HOLD_MODES,
@@ -32,7 +33,8 @@ _INPUT_KINDS = {'sdl_gamecontroller', 'raw_joystick'}
 _SAFE_ACTIONS = {'none', 'suppress', 'hold', 'shortcut', 'mouse_hold', 'mouse_click',
                  'wheel', 'capture', 'replay_record', 'record_toggle', 'home', 'gallery',
                  'volume_mute', 'volume_up', 'volume_down', 'media',
-                 'gamepad_button', 'gamepad_chord', 'gamepad_turbo'}
+                 'gamepad_button', 'gamepad_chord', 'gamepad_turbo',
+                 'gamepad_axis', 'mouse_move'}
 _INPUT_FIELDS = INPUT_OPTION_FIELDS
 
 
@@ -162,7 +164,8 @@ def _binding(binding):
     if action not in _SAFE_ACTIONS:
         raise ValueError('便携预设包含不受支持的映射动作')
     has_value = action in {'hold', 'shortcut', 'mouse_hold', 'mouse_click', 'wheel',
-                           'gamepad_button', 'gamepad_chord', 'gamepad_turbo'}
+                           'gamepad_button', 'gamepad_chord', 'gamepad_turbo',
+                           'gamepad_axis', 'mouse_move'}
     # Older local entries keep an empty value even for "none". It carries no
     # behavior and is discarded; every other extra field is rejected.
     allowed = {'action', 'value'} | ({'rate_hz'} if action == 'gamepad_turbo' else set())
@@ -196,6 +199,12 @@ def _binding(binding):
         if not set(parts) <= set(GAMEPAD_TARGETS) or (action != 'gamepad_chord' and len(parts) != 1):
             raise ValueError('请选择支持的目标手柄按键')
         result['value'] = target
+    if action == 'gamepad_axis':
+        if result['value'] not in STICK_DIRECTIONS:
+            raise ValueError('请选择支持的目标摇杆方向')
+    if action == 'mouse_move':
+        if result['value'] not in MOUSE_DIRECTIONS:
+            raise ValueError('请选择鼠标移动方向')
     if action == 'gamepad_turbo':
         rate = binding.get('rate_hz', 15)
         if isinstance(rate, bool) or not isinstance(rate, int) or not 5 <= rate <= 30:

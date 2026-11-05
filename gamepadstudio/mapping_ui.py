@@ -8,7 +8,8 @@ from PySide6.QtWidgets import (QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabe
     QPushButton, QComboBox, QLineEdit, QDialogButtonBox, QListWidget, QListWidgetItem,
     QFormLayout, QFileDialog, QMessageBox, QDoubleSpinBox, QGridLayout, QSpinBox, QGroupBox,
     QCheckBox, QScrollArea)
-from .mapping_engine import (INPUTS, GAMEPAD_TARGETS, InputNormalizer, canonical_trigger, trigger_label,
+from .mapping_engine import (INPUTS, GAMEPAD_TARGETS, STICK_DIRECTIONS, MOUSE_DIRECTIONS,
+                             MOUSE_DIRECTION_ARROWS, InputNormalizer, canonical_trigger, trigger_label,
                              binding_label, validate_mappings, effective_mappings, profile_family, input_sources)
 from .mapping_deck import FlowLayout
 from .studio_core import ACTION_NAMES, device_config
@@ -102,7 +103,27 @@ class GamepadTargetSelector(QWidget):
             self.grid.addWidget(btn, 1, col)
             self.buttons[k] = btn
 
-        layout.addLayout(self.grid)
+        # A pad of buttons is a QWidget, not a bare layout, so a direction target can
+        # swap the whole 18-button face out instead of hiding it button by button.
+        self.pad = QWidget()
+        self.pad.setLayout(self.grid)
+        layout.addWidget(self.pad)
+
+        self.axis_pads = QWidget()
+        ap_l = QHBoxLayout(self.axis_pads)
+        ap_l.setContentsMargins(0, 0, 0, 0)
+        ap_l.setSpacing(16)
+        for stick, caption in (('LS', tr('左摇杆')), ('RS', tr('右摇杆'))):
+            ap_l.addWidget(self._build_cross(
+                ((f'{stick}:up', '↑'), (f'{stick}:left', '←'),
+                 (f'{stick}:right', '→'), (f'{stick}:down', '↓')), caption))
+        layout.addWidget(self.axis_pads)
+        self.axis_pads.hide()
+
+        self.mouse_pad = self._build_cross(
+            (('up', '↑'), ('left', '←'), ('right', '→'), ('down', '↓')), tr('鼠标移动方向'))
+        layout.addWidget(self.mouse_pad)
+        self.mouse_pad.hide()
 
         # Status & Turbo Controls
         self.info_row = QHBoxLayout()
@@ -228,6 +249,30 @@ class GamepadTargetSelector(QWidget):
                    .replace('Left Bumper', 'LB').replace('Right Bumper', 'RB')
                    .replace('触摸板按键', 'TP').replace('Touchpad Click', 'TP'))
 
+    def _build_cross(self, keys, caption):
+        """A four-arrow pad that reuses the button grid's selection state and styling."""
+        wrap = QWidget()
+        column = QVBoxLayout(wrap)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(4)
+        title = QLabel(caption, wrap)
+        title.setStyleSheet(f"color: {TOKENS['ink_2']}; font-size: 11px; font-weight: 700;")
+        title.setAlignment(Qt.AlignCenter)
+        column.addWidget(title)
+        cross = QGridLayout()
+        cross.setSpacing(6)
+        for (key, arrow), (row, col) in zip(keys, ((0, 1), (1, 0), (1, 2), (2, 1))):
+            btn = QPushButton(arrow)
+            btn.setCheckable(True)
+            btn.setFixedSize(44, 32)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setToolTip(f'{caption} {arrow}')
+            btn.clicked.connect(lambda chk=False, k=key: self._on_btn_clicked(k))
+            cross.addWidget(btn, row, col)
+            self.buttons[key] = btn
+        column.addLayout(cross)
+        return wrap
+
     def _on_turbo_changed(self, v):
         self.turbo_rate = v
         self.info_label.setText(self._summary_text())
@@ -236,7 +281,7 @@ class GamepadTargetSelector(QWidget):
         if self.mode == 'macro':
             self._append_step(key)
             return
-        if self.mode in ('single', 'turbo'):
+        if self.mode in ('single', 'turbo', 'axis', 'mouse'):
             self.selected = {key}
         else:
             if key in self.selected:
@@ -275,6 +320,16 @@ class GamepadTargetSelector(QWidget):
             # The chip pane below already spells out the sequence; repeating all 64 of
             # them here would wrap into rows and steal height from a handheld screen.
             return (f'🎯 目标手柄宏: {len(self.macro_steps)} 步 · 约 {total} ms{suffix}')
+        if self.mode == 'axis':
+            if not self.selected <= set(STICK_DIRECTIONS):
+                return '🎯 请在下方选择目标摇杆方向'
+            return ('🎯 映射为虚拟摇杆方向: ' + trigger_label(next(iter(self.selected)), self.family)
+                    + tr(' · 按住期间该轴满偏'))
+        if self.mode == 'mouse':
+            if not self.selected <= set(MOUSE_DIRECTIONS):
+                return '🖱 请在下方选择鼠标移动方向'
+            return ('🖱 模拟鼠标移动: ' + MOUSE_DIRECTION_ARROWS[next(iter(self.selected))]
+                    + tr(' · 按住期间连续移动'))
         if not self.selected:
             return '请在上方选择目标手柄按键'
         names = [trigger_label(k, self.family) for k in sorted(self.selected, key=lambda x: str(x))]
@@ -292,10 +347,17 @@ class GamepadTargetSelector(QWidget):
 
     def set_mode(self, mode):
         self.mode = mode
+        self.pad.setVisible(mode in ('single', 'chord', 'turbo', 'macro'))
+        self.axis_pads.setVisible(mode == 'axis')
+        self.mouse_pad.setVisible(mode == 'mouse')
         self.turbo_box.setVisible(mode == 'turbo')
         self.macro_box.setVisible(mode == 'macro')
         if mode in ('single', 'turbo') and len(self.selected) > 1:
             self.selected = {next(iter(sorted(self.selected)))}
+        if mode == 'axis' and not (self.selected <= set(STICK_DIRECTIONS)):
+            self.selected = {'LS:up'}
+        if mode == 'mouse' and not (self.selected <= set(MOUSE_DIRECTIONS)):
+            self.selected = {'up'}
         self._update_styles()
 
     def set_value(self, val):
@@ -615,6 +677,8 @@ class BindingDialog(QDialog):
         GAMEPAD_UI_ACTIONS = [
             ('none', '保留原始输入 (Pass-through)'),
             ('gamepad_button', '映射为手柄按键 (Remap)'),
+            ('gamepad_axis', '映射为手柄摇杆方向 (左/右摇杆四向)'),
+            ('mouse_move', '模拟鼠标移动 (按住连续移动)'),
             ('gamepad_chord', '手柄多键组合宏 (一键出招)'),
             ('gamepad_macro', '手柄动作宏 (连招序列)'),
             ('gamepad_turbo', '手柄高频连发 (Turbo)'),
@@ -630,6 +694,7 @@ class BindingDialog(QDialog):
             ('shortcut', '触发按键/组合键 (Shortcut)'),
             ('mouse_hold', '按住鼠标键 (Mouse Hold)'),
             ('mouse_click', '单击鼠标键 (Mouse Click)'),
+            ('mouse_move', '模拟鼠标移动 (按住连续移动)'),
             ('wheel', '鼠标滚轮滚动 (Mouse Wheel)'),
             ('none', '保留原始输入 (Pass-through)'),
             ('suppress', '屏蔽此按键 (Suppress)'),
@@ -660,6 +725,7 @@ class BindingDialog(QDialog):
         self.target_selectors = {}
         self.kbm_fields = {}
         self.mouse_combos = {}
+        self.mouse_dir_combos = {}
         self.hold_modes = {}
         self.hold_mode_rows = {}
         self.turbo_spins = {}
@@ -712,13 +778,20 @@ class BindingDialog(QDialog):
                 elif current_act == 'gamepad_button':
                     selector.set_mode('single')
                     selector.set_value(binding.get('value', '0'))
+                elif current_act == 'gamepad_axis':
+                    selector.set_mode('axis')
+                    selector.set_value(binding.get('value', 'LS:up'))
+                elif current_act == 'mouse_move':
+                    selector.set_mode('mouse')
+                    selector.set_value(binding.get('value', 'up'))
                 b_l.addWidget(selector)
                 self.target_selectors[gesture] = selector
 
                 def make_gamepad_updater(a=action, s=selector):
                     def update():
                         k = a.currentData()
-                        if k in ('gamepad_button', 'gamepad_chord', 'gamepad_macro', 'gamepad_turbo'):
+                        if k in ('gamepad_button', 'gamepad_chord', 'gamepad_macro', 'gamepad_turbo',
+                                 'gamepad_axis', 'mouse_move'):
                             s.show()
                             if k == 'gamepad_button':
                                 s.set_mode('single')
@@ -728,6 +801,10 @@ class BindingDialog(QDialog):
                                 s.set_mode('macro')
                             elif k == 'gamepad_turbo':
                                 s.set_mode('turbo')
+                            elif k == 'gamepad_axis':
+                                s.set_mode('axis')
+                            else:
+                                s.set_mode('mouse')
                         else:
                             s.hide()
                     return update
@@ -753,6 +830,16 @@ class BindingDialog(QDialog):
             mouse_combo.setCurrentIndex(max(0, m_idx))
             b_l.addWidget(mouse_combo)
             self.mouse_combos[gesture] = mouse_combo
+
+            mouse_dir_combo = QComboBox()
+            for v, d_name in [('up', '鼠标向上移动'), ('down', '鼠标向下移动'),
+                              ('left', '鼠标向左移动'), ('right', '鼠标向右移动')]:
+                mouse_dir_combo.addItem(d_name, v)
+            mouse_dir_combo.setToolTip(tr('按住期间沿所选方向连续移动光标，沿用虚拟键鼠的手感设置'))
+            d_idx = mouse_dir_combo.findData(binding.get('value', 'up'))
+            mouse_dir_combo.setCurrentIndex(max(0, d_idx))
+            b_l.addWidget(mouse_dir_combo)
+            self.mouse_dir_combos[gesture] = mouse_dir_combo
 
             hold_mode_row = QWidget()
             hold_mode_layout = QHBoxLayout(hold_mode_row)
@@ -809,16 +896,18 @@ class BindingDialog(QDialog):
             self.launch_paths[gesture] = path_edit
             self.launch_args[gesture] = args_edit
 
-            def make_kbm_updater(a=action, kr=kbm_row, mc=mouse_combo, lr=launch_row, mr=hold_mode_row, tu=t_updater):
+            def make_kbm_updater(a=action, kr=kbm_row, mc=mouse_combo, md=mouse_dir_combo,
+                                 lr=launch_row, mr=hold_mode_row, tu=t_updater):
                 def update():
                     k = a.currentData()
                     kr.setVisible(k in ('hold', 'shortcut'))
                     mc.setVisible(k in ('mouse_hold', 'mouse_click', 'wheel'))
+                    md.setVisible(self.mode == 'kbm' and k == 'mouse_move')
                     mr.setVisible(not self.touch_gesture and self.mode == 'kbm' and k in ('hold', 'mouse_hold'))
                     lr.setVisible(k == 'launch')
                     tu()
                 return update
-            updater = make_kbm_updater(action, kbm_row, mouse_combo, launch_row)
+            updater = make_kbm_updater(action, kbm_row, mouse_combo, mouse_dir_combo, launch_row)
             action.currentIndexChanged.connect(updater)
             updater()
 
@@ -1145,11 +1234,15 @@ class BindingDialog(QDialog):
                 elif action_code == 'gamepad_turbo':
                     binding['value'] = self.target_selectors[g].get_selected_single()
                     binding['rate_hz'] = self.target_selectors[g].get_turbo_rate()
+                elif action_code in ('gamepad_axis', 'mouse_move'):
+                    binding['value'] = self.target_selectors[g].get_selected_single()
             else:
                 if action_code in ('hold', 'shortcut'):
                     binding['value'] = self.kbm_fields[g].text().strip()
                 elif action_code in ('mouse_hold', 'mouse_click', 'wheel'):
                     binding['value'] = self.mouse_combos[g].currentData()
+                elif action_code == 'mouse_move':
+                    binding['value'] = self.mouse_dir_combos[g].currentData()
                 elif action_code == 'launch':
                     binding.update(executable=self.launch_paths[g].text().strip(), arguments=self.launch_args[g].text().strip())
                 if not self.touch_gesture and action_code in ('hold', 'mouse_hold'):

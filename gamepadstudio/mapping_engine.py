@@ -24,12 +24,25 @@ ALIASES = {'A': '0', 'B': '1', 'X': '2', 'Y': '3', 'BACK': '4',
 INPUTS = [str(i) for i in range(128)] + ['LT', 'RT'] + [f'{s}:{d}' for s in ('LS', 'RS') for d in ('up', 'down', 'left', 'right')] + ['LS:outer', 'LS:inner', 'LS:up:outer', 'LS:down:outer', 'LS:left:outer', 'LS:right:outer'] + list(TOUCH_INPUTS)
 GESTURES = ('short', 'long')
 GAMEPAD_TARGETS = ['0', '1', '2', '3', '9', '10', 'LT', 'RT', '11', '12', '13', '14', '7', '8', '4', '6', '5', '15']
-GAMEPAD_ACTIONS = {'gamepad_button', 'gamepad_chord', 'gamepad_turbo', 'gamepad_macro'}
-HOLD_ACTIONS = ('hold', 'mouse_hold', 'gamepad_button', 'gamepad_chord', 'gamepad_turbo')
+# Direction tokens double as outputs: `compose_xusb_report` already turns 'LS:up'
+# into a deflected thumb axis. They stay out of GAMEPAD_TARGETS so a direction
+# cannot sneak into a macro step or a portable profile that the runner ignores.
+STICK_DIRECTIONS = [f'{s}:{d}' for s in ('LS', 'RS') for d in ('up', 'right', 'down', 'left')]
+MOUSE_DIRECTIONS = ['up', 'right', 'down', 'left']
+MOUSE_DIRECTION_ARROWS = {'up': '↑', 'down': '↓', 'left': '←', 'right': '→'}
+# Axis index and the sign that axis carries while the direction is deflected, in SDL
+# convention (negative is up/left). Used to drop a consumed half-axis from the mirror.
+STICK_AXIS_SIGNS = {'LS:up': (1, -1), 'LS:down': (1, 1), 'LS:left': (0, -1), 'LS:right': (0, 1),
+                    'RS:up': (3, -1), 'RS:down': (3, 1), 'RS:left': (2, -1), 'RS:right': (2, 1)}
+MOUSE_DIRECTION_VECTORS = {'up': (0., -1.), 'down': (0., 1.), 'left': (-1., 0.), 'right': (1., 0.)}
+GAMEPAD_ACTIONS = {'gamepad_button', 'gamepad_chord', 'gamepad_turbo', 'gamepad_macro', 'gamepad_axis'}
+HOLD_ACTIONS = ('hold', 'mouse_hold', 'gamepad_button', 'gamepad_chord', 'gamepad_turbo',
+               'gamepad_axis', 'mouse_move')
 ACTIONS = {'none', 'suppress', 'hold', 'shortcut', 'mouse_hold', 'mouse_click', 'wheel', 'capture',
            'replay_record', 'record_toggle', 'home', 'gallery', 'launch',
            'volume_mute', 'volume_up', 'volume_down', 'media',
            'gamepad_button', 'gamepad_chord', 'gamepad_turbo', 'gamepad_macro',
+           'gamepad_axis', 'mouse_move',
            'antigravity'}
 
 # Mirrors the runner defaults below, so a validated binding always executes
@@ -133,6 +146,10 @@ def validate_binding(binding):
         raise ValueError('请设置目标手柄组合键')
     if action == 'gamepad_turbo' and not str(binding.get('value', '')).strip():
         raise ValueError('请选择手柄连发按键')
+    if action == 'gamepad_axis' and binding.get('value') not in STICK_DIRECTIONS:
+        raise ValueError('请选择目标摇杆方向')
+    if action == 'mouse_move' and binding.get('value') not in MOUSE_DIRECTIONS:
+        raise ValueError('请选择鼠标移动方向')
     if action == 'gamepad_macro':
         binding['sequence'] = _macro_sequence(binding.get('sequence'))
         # Absent flags already read as False in the runner; do not materialize
@@ -326,6 +343,10 @@ def binding_label(binding, family='generic'):
     value = binding.get('value', '')
     if action == 'gamepad_button':
         return '手柄 ' + trigger_label(value, family)
+    if action == 'gamepad_axis':
+        return tr('虚拟') + trigger_label(value, family)
+    if action == 'mouse_move':
+        return tr('鼠标移动') + MOUSE_DIRECTION_ARROWS.get(value, value)
     if action == 'gamepad_chord':
         return '手柄组合 [' + trigger_label(value, family) + ']'
     if action == 'gamepad_turbo':
@@ -369,6 +390,10 @@ def output_tokens(binding):
         return [f'pad:{p}' for p in binding.get('value', '').split('+')]
     if action == 'gamepad_turbo':
         return [f'pad_turbo:{binding.get("value", "")}']
+    if action == 'gamepad_axis':
+        return [f'pad:{binding.get("value", "")}']
+    if action == 'mouse_move':
+        return ['mouse_axis:' + str(binding.get('value', ''))]
     if action in ('hold', 'shortcut'):
         return [f'key:{key}' for key in parse_keys(binding.get('value', ''))]
     if action in ('mouse_hold', 'mouse_click'):
@@ -376,6 +401,31 @@ def output_tokens(binding):
     if action == 'wheel':
         return ['mouse:wheel_' + binding['value']]
     return [] if action in ('none', 'suppress') else ['action:' + action]
+
+
+def stick_axis_bindings(mappings):
+    """Direction tokens this profile drives onto the virtual thumbsticks."""
+    result = set()
+    for entry in (mappings or {}).values():
+        if not isinstance(entry, dict):
+            continue
+        for gesture in GESTURES:
+            binding = entry.get(gesture) or {}
+            if binding.get('action') == 'gamepad_axis' and binding.get('value') in STICK_DIRECTIONS:
+                result.add(binding['value'])
+    return result
+
+
+def mouse_axis_vector(counts):
+    """Net vector from the mouse_move directions that are currently held."""
+    x = y = 0.
+    for token, count in counts.items():
+        if not count or not token.startswith('mouse_axis:'):
+            continue
+        dx, dy = MOUSE_DIRECTION_VECTORS.get(token.split(':', 1)[1], (0., 0.))
+        x += dx
+        y += dy
+    return max(-1., min(1., x)), max(-1., min(1., y))
 
 
 INPUT_THRESHOLD_DEFAULTS = {'trigger_press': .55, 'trigger_release': .35,
@@ -686,6 +736,13 @@ class MappingRuntime:
         self.mouse_thread = None
         self.config_signature = None
         self.unsupported_bindings = []
+        # The virtual pad only starts mirroring sticks once a profile maps a
+        # direction, so an untouched setup keeps emitting button-only frames.
+        self.stick_mirror_live = False
+        self.virtual_axes_signature = None
+        # None asks the driver once; a host may pin it. Without a backend the mirror must
+        # stay off, or a profile that merely contains a direction would fail every tick.
+        self.stick_mirror_enabled = None
         from .virtual_xinput import compose_xusb_report
         self.virtual_xinput_state = compose_xusb_report()[1]
         if start_mouse:
@@ -709,6 +766,10 @@ class MappingRuntime:
             self.actions.hold(binding['value'], down)
         elif binding['action'] in GAMEPAD_ACTIONS:
             self.dispatch(binding, down)
+        elif binding['action'] == 'mouse_move':
+            # Displacement is synthesized from the held mouse_axis counts, never
+            # from the mouse-button channel, so nothing is clicked here.
+            pass
         else:
             token = tokens[0]
             if (down and self.output_counts[token] == 0) or (not down and self.output_counts[token] == 1):
@@ -1068,7 +1129,14 @@ class MappingRuntime:
                     and required_sources <= set(input_sources(state))
                     and not self.blocked.intersection(blocked_sources))
             desktop = mouse_opts.get('mode', 'game') == 'desktop' or (hasattr(self.actions, 'is_nikki_game_focused') and not self.actions.is_nikki_game_focused())
-            self.mouse_thread.update_stick(stick_axes[0] if move else 0., stick_axes[1] if move else 0., is_desktop=desktop)
+            # A direction bound to 模拟鼠标移动 drives the same thread, so it works with the
+            # stick-mouse option off and on a pad whose stick that option would use.
+            digital_x, digital_y = mouse_axis_vector(self.output_counts) if owns_profile else (0., 0.)
+            analog_x = stick_axes[0] if move else 0.
+            analog_y = stick_axes[1] if move else 0.
+            self.mouse_thread.update_stick(max(-1., min(1., analog_x + digital_x)),
+                                           max(-1., min(1., analog_y + digital_y)),
+                                           is_desktop=desktop)
             self.mouse_thread.set_click_lock(any(n for k, n in self.output_counts.items() if k.startswith('mouse:')))
 
             if hasattr(self.mouse_thread, 'update_gyro'):
@@ -1086,6 +1154,8 @@ class MappingRuntime:
 
     def _update_virtual_xinput_state(self, state, regular_mappings):
         from .virtual_xinput import XUSB_BUTTON_MASKS, compose_xusb_report
+        bound_directions = stick_axis_bindings(regular_mappings)
+        mirror = bool(bound_directions) and self.stick_mirror_allowed()
         intercepted = set()
         for trig_key, entry in (regular_mappings or {}).items():
             if not isinstance(entry, dict):
@@ -1107,11 +1177,54 @@ class MappingRuntime:
             if cnt > 0 and tok.startswith('pad:')
         }
         combined = passthrough | emitted
-        _, snap = compose_xusb_report(combined, (state or {}).get('axes', ()))
+        consumed = intercepted & self.inputs & set(STICK_DIRECTIONS) if mirror else set()
+        axes = self.mirrored_stick_axes(state, consumed)
+        _, snap = compose_xusb_report(combined, axes)
         snap['passthrough_buttons'] = sorted(passthrough)
         snap['emitted_buttons'] = sorted(emitted)
         snap['intercepted_buttons'] = sorted(intercepted & self.inputs)
+        snap['stick_mirror'] = mirror
         self.virtual_xinput_state = snap
+        self.emit_virtual_axes(axes, mirror)
+
+    def stick_mirror_allowed(self):
+        if self.stick_mirror_enabled is not None:
+            return bool(self.stick_mirror_enabled)
+        from .virtual_xinput import virtual_gamepad_backend_available
+        self.stick_mirror_enabled = bool(virtual_gamepad_backend_available())
+        return self.stick_mirror_enabled
+
+    def mirrored_stick_axes(self, state, consumed):
+        """Physical sticks, minus the half-axes a mapping has just consumed.
+
+        A direction that is both bound and pressed belongs to its mapping: leaving it in
+        the mirror would report the same deflection twice on one stick.
+        """
+        axes = list((state or {}).get('axes', [])) + [0.] * 6
+        axes = [float(value) for value in axes[:6]]
+        for direction in consumed:
+            index, sign = STICK_AXIS_SIGNS[direction]
+            if axes[index] * sign > 0:
+                axes[index] = 0.
+        return axes
+
+    def emit_virtual_axes(self, axes, active):
+        if self.preview:
+            return
+        if not active:
+            if not self.stick_mirror_live:
+                return
+            self.stick_mirror_live = False
+            axes = [0.] * 6
+        else:
+            self.stick_mirror_live = True
+        signature = tuple(round(value, 3) for value in axes[:4])
+        if signature == self.virtual_axes_signature:
+            return
+        self.virtual_axes_signature = signature
+        sync = getattr(self.actions, 'sync_virtual_gamepad', None)
+        if callable(sync):
+            sync(axes=axes)
 
     def feedback(self):
         return {'preview': self.preview, 'inputs': sorted(self.inputs), 'active': list(self.engine.pressed),
@@ -1186,6 +1299,7 @@ class MappingRuntime:
         self.touch_activity = {'contacts': 0, 'mode': 'idle'}
         from .virtual_xinput import compose_xusb_report
         self.virtual_xinput_state = compose_xusb_report()[1]
+        self.emit_virtual_axes([0.] * 6, active=False)
         self.blocked.update(self.inputs if blocked is None else blocked)
         if self.mouse_thread:
             self.mouse_thread.update_stick(0., 0.)

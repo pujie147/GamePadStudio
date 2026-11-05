@@ -38,7 +38,7 @@ from .controller_photo import ControllerPhoto, ControllerInput, PHOTOS, photo_he
 from .input_tester import InputTester
 from .controller_catalog import CATALOG, button_labels, capture_button, button_order, controller_defaults
 from .studio_core import device_config, profile_scope, DEVICE_SETTING_KEYS
-from .mapping_engine import profile_family, input_sources, canonical_trigger, trigger_label
+from .mapping_engine import profile_family, input_sources, canonical_trigger, trigger_label, STICK_DIRECTIONS
 from .screenshot_service import take_screenshot, list_captures, set_favorite, delete_capture
 from .manual_recording import ManualRecording
 
@@ -630,7 +630,7 @@ class Studio(GlassWindow):
         self.mapping_grid = grid
         grid.setContentsMargins(0, 0, 4, 0)
         grid.setSpacing(8)
-        for i, key in enumerate([*range(64), 'LT', 'RT']):
+        for i, key in enumerate([*range(64), 'LT', 'RT', *STICK_DIRECTIONS]):
             box = QPushButton()
             box.setObjectName('mappingTile')
             box.setCheckable(True)
@@ -660,8 +660,8 @@ class Studio(GlassWindow):
             grid.addWidget(box, i // 2, i % 2)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
-        self.mapping_input_order = button_order('generic') + ['LT', 'RT']
-        self.mapping_available = set(range(15)) | {'LT', 'RT'}
+        self.mapping_input_order = button_order('generic') + ['LT', 'RT'] + STICK_DIRECTIONS
+        self.mapping_available = set(range(15)) | {'LT', 'RT'} | set(STICK_DIRECTIONS)
         self.mapping_inputs = scroll(rows)
         self.mapping_inputs.setMinimumWidth(0)
         self.mapping_inputs.setMinimumHeight(190)
@@ -1713,8 +1713,9 @@ class Studio(GlassWindow):
         order = button_order(family)
         insert = order.index(10) + 1 if 10 in order else len(order)
         order[insert:insert] = ['LT', 'RT']
-        self.mapping_input_order = order + [key for key in sorted(available) if key not in order]
-        self.mapping_available = available | (sources & {'LT', 'RT'})
+        self.mapping_input_order = (order + [key for key in sorted(available) if key not in order]
+                                    + [key for key in STICK_DIRECTIONS if key in sources])
+        self.mapping_available = available | (sources & {'LT', 'RT'}) | (sources & set(STICK_DIRECTIONS))
         for key in self.mapping_input_order:
             if key not in self.mapping_boxes:
                 continue
@@ -2396,6 +2397,11 @@ class Studio(GlassWindow):
         elif action=='gamepad_turbo':
             self.actions.gamepad_turbo(binding.get('value', '0'), down, binding.get('rate_hz', 15))
             return
+        elif action=='gamepad_axis':
+            self.actions.gamepad_button(binding.get('value', 'LS:up'), down)
+            return
+        elif action=='mouse_move':
+            return
         if action=='hold': self.actions.hold(binding.get('value',''),down); return
         if not down or action=='none': return
         if action=='capture': self.capture()
@@ -2818,7 +2824,7 @@ class Studio(GlassWindow):
     @staticmethod
     def compact_binding(action, family='generic'):
         kind=action.get('action','none')
-        if kind in ('gamepad_button','gamepad_chord','gamepad_turbo','gamepad_macro'):
+        if kind in ('gamepad_button','gamepad_chord','gamepad_turbo','gamepad_macro','gamepad_axis','mouse_move'):
             return binding_label(action, family)
         if kind in ('mouse_hold','mouse_click','wheel'):return binding_label(action)
         if kind in ('shortcut','hold'):return action.get('value','')

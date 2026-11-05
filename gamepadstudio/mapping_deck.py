@@ -9,7 +9,7 @@ from .glass import TOKENS
 from .i18n import tr
 from .controller_glyphs import display_parts, make_token_label
 from .mapping_engine import (canonical_trigger, trigger_label, effective_mappings,
-                             profile_family, binding_label)
+                             profile_family, binding_label, MOUSE_DIRECTION_ARROWS)
 from .response_curves import curve_capabilities
 
 
@@ -168,12 +168,15 @@ class ActionCard(QPushButton):
         _add_keys(self.output, trigger, family, self)
         self.output.addWidget(_text('→', self))
         action = binding.get('action', 'none')
-        if action in ('gamepad_button', 'gamepad_chord', 'gamepad_turbo'):
+        if action in ('gamepad_button', 'gamepad_chord', 'gamepad_turbo', 'gamepad_axis'):
             _add_keys(self.output, binding.get('value', ''), family, self, True)
             if action == 'gamepad_turbo':
                 self.output.addWidget(_chip(f"{binding.get('rate_hz', 15):g} Hz", self, True))
             elif action == 'gamepad_chord':
                 self.output.addWidget(_text(tr('同时触发'), self))
+        elif action == 'mouse_move':
+            self.output.addWidget(_chip(tr('鼠标移动') + MOUSE_DIRECTION_ARROWS.get(
+                binding.get('value', ''), ''), self, True))
         elif action == 'gamepad_macro':
             sequence = binding.get('sequence', [])
             for index, step in enumerate(sequence[:8]):

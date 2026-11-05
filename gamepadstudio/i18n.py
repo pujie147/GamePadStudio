@@ -1593,3 +1593,23 @@ TRANSLATIONS.update({
     '驱动已安装但未运行。可尝试修复启动服务，或重启系统。':
         'The driver is installed but not running. Try Repair, or reboot the system.',
 })
+
+# Stick-direction and emulated-mouse targets.
+TRANSLATIONS.update({
+    '右摇杆': 'Right stick',
+    '虚拟': 'Virtual ',
+    '鼠标移动': 'Mouse move',
+    '鼠标移动方向': 'Mouse movement direction',
+    '映射为手柄摇杆方向 (左/右摇杆四向)': 'Remap to Gamepad Stick Direction (L/R, four ways)',
+    '模拟鼠标移动 (按住连续移动)': 'Emulate Mouse Movement (hold to move)',
+    '鼠标向上移动': 'Move mouse up',
+    '鼠标向下移动': 'Move mouse down',
+    '鼠标向左移动': 'Move mouse left',
+    '鼠标向右移动': 'Move mouse right',
+    '按住期间沿所选方向连续移动光标，沿用虚拟键鼠的手感设置':
+        'Holds move the cursor continuously along the chosen direction, using the virtual KBM feel settings',
+    '🎯 映射为虚拟摇杆方向: ': '🎯 Remapped to virtual stick direction: ',
+    ' · 按住期间该轴满偏': ' · axis held at full deflection',
+    '🖱 模拟鼠标移动: ': '🖱 Emulated mouse move: ',
+    ' · 按住期间连续移动': ' · continuous movement while held',
+})

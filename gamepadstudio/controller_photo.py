@@ -8,7 +8,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal, QByteArray
-from PySide6.QtGui import QColor, QPainter, QPixmap, QPen, QFont
+from PySide6.QtGui import QColor, QPainter, QPixmap, QPen, QFont, QPolygonF
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QWidget, QSizePolicy
 
@@ -45,6 +45,14 @@ XINPUT_SVG_CENTERS = {
     14: (183.0, 238.0),
     15: (220.5, 188.0),
 }
+
+
+# The two thumbsticks share the well centres drawn in reference_xbox.svg. Direction
+# chips sit on the rim so they stay clear of the L3 / R3 press anchor at the centre.
+XINPUT_STICK_CENTERS = {'LS': (113.0, 160.0), 'RS': (278.0, 238.0)}
+STICK_DIRECTION_VECTORS = {'up': (0.0, -1.0), 'right': (1.0, 0.0),
+                           'down': (0.0, 1.0), 'left': (-1.0, 0.0)}
+STICK_RIM = 30.0
 
 
 def tint_xbox(svg_bytes):
@@ -224,6 +232,16 @@ class ControllerPhoto(QWidget):
         _, _, vw, vh = XINPUT_VIEWBOX
         return {'LT': (138.5 / vw, 35.0 / vh), 'RT': (302.5 / vw, 35.0 / vh)}
 
+    def stick_direction_anchors(self):
+        """The four rim points of each thumbstick, as `LS:up` style tokens."""
+        _, _, vw, vh = XINPUT_VIEWBOX
+        result = {}
+        for stick, (cx, cy) in XINPUT_STICK_CENTERS.items():
+            for direction, (dx, dy) in STICK_DIRECTION_VECTORS.items():
+                result[f'{stick}:{direction}'] = ((cx + dx * STICK_RIM) / vw,
+                                                  (cy + dy * STICK_RIM) / vh)
+        return result
+
     def input_is_available(self, key):
         available = getattr(self, 'available', None)
         if key in ('LT', 'RT'):
@@ -231,6 +249,11 @@ class ControllerPhoto(QWidget):
                 return key in available
             axes = getattr(self, 'available_axes', None)
             return axes is None or (4 if key == 'LT' else 5) in axes
+        if isinstance(key, str) and key.count(':') == 1 and key.split(':')[0] in XINPUT_STICK_CENTERS:
+            axes = getattr(self, 'available_axes', None)
+            if axes is None:
+                return available is None or key in available or str(key) in available
+            return (0 if key.startswith('LS:') else 2) in axes
         return available is None or key in available or str(key) in available
 
     def trigger_regions(self):
@@ -310,7 +333,7 @@ class ControllerInput(ControllerPhoto):
             self.update()
 
     def anchors(self):
-        return {**self.button_anchors(), **self.trigger_anchors()}
+        return {**self.button_anchors(), **self.trigger_anchors(), **self.stick_direction_anchors()}
 
     def button_anchors(self):
         _, _, vw, vh = XINPUT_VIEWBOX
@@ -375,6 +398,31 @@ class ControllerInput(ControllerPhoto):
             painter.setBrush(h_fill)
             painter.drawEllipse(QPointF(rect.left() + hx * rect.width(), rect.top() + hy * rect.height()), radius, radius)
 
+        # Thumbstick rim chips: one chevron per direction, so the eight stick
+        # directions are reachable on the art and not only in the list beside it.
+        chip = max(4.5, min(9., rect.width() * .014))
+        for key, (x, y) in self.stick_direction_anchors().items():
+            if not self.input_is_available(key):
+                continue
+            ux, uy = STICK_DIRECTION_VECTORS[key.split(':')[1]]
+            center = QPointF(rect.left() + x * rect.width(), rect.top() + y * rect.height())
+            chosen = key in self.selected_buttons
+            color = QColor(TOKENS['accent']) if (chosen or key == self.hovered_key) else QColor(168, 162, 158, 130)
+            if chosen or key == self.hovered_key:
+                ring = QColor(color)
+                ring.setAlpha(60 if chosen else 26)
+                painter.setPen(QPen(color, 2. if chosen else 1.5))
+                painter.setBrush(ring)
+                painter.drawEllipse(center, chip * 1.9, chip * 1.9)
+            tip = center + QPointF(ux * chip, uy * chip)
+            base = center - QPointF(ux * chip * .6, uy * chip * .6)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(color)
+            painter.drawPolygon(QPolygonF([
+                tip,
+                base + QPointF(-uy * chip * .75, ux * chip * .75),
+                base - QPointF(-uy * chip * .75, ux * chip * .75)]))
+
         if not active_keys:
             return
         stroke = QColor(TOKENS['accent'])
@@ -391,13 +439,25 @@ class ControllerInput(ControllerPhoto):
             if region.contains(pos):
                 return key if self.input_is_available(key) else None
         rect = self.product_rect()
-        points = {k: QPointF(rect.left() + x * rect.width(), rect.top() + y * rect.height())
-                  for k, (x, y) in self.button_anchors().items()}
-        if not points:
-            return None
+
         def distance_squared(point):
             delta = point - pos
             return delta.x() ** 2 + delta.y() ** 2
+
+        def project(anchors):
+            return {k: QPointF(rect.left() + x * rect.width(), rect.top() + y * rect.height())
+                    for k, (x, y) in anchors.items()}
+
+        # Rim chips are tested first: the L3 / R3 press anchor keeps a generous radius
+        # below, and would otherwise swallow every click aimed at a direction.
+        sticks = project(self.stick_direction_anchors())
+        if sticks:
+            key = min(sticks, key=lambda k: distance_squared(sticks[k]))
+            if self.input_is_available(key) and distance_squared(sticks[key]) < max(12., rect.width() * .035) ** 2:
+                return key
+        points = project(self.button_anchors())
+        if not points:
+            return None
         key = min(points, key=lambda k: distance_squared(points[k]))
         if self.input_is_available(key) and distance_squared(points[key]) < max(20, rect.width() * .075) ** 2:
             return key

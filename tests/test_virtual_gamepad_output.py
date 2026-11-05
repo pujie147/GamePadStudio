@@ -223,8 +223,14 @@ def test_connect_leaves_no_phantom_stick_offset(pad):
     ([],                           [0, 0, 1.0, 1.0, 0, 0],    (0, 0, SIGNATURE_RT, 0, 0, 32767, -32767)),
     (['0', '11'],                  [0.5, -0.25, 0, 0, 0.5, 0], (BTN['A'] | BTN['UP'], 128, SIGNATURE_RT,
                                                                 16384, 8192, 0, 0)),
+    # A bound direction is a button token, so the mapping layer hands it in directly.
+    (['LS:up'],                    [0, 0, 0, 0, 0, 0],        (0, 0, SIGNATURE_RT, 0, 32767, 0, 0)),
+    (['RS:left'],                  [0, 0, 0, 0, 0, 0],        (0, 0, SIGNATURE_RT, 0, 0, -32767, 0)),
+    # The unmapped stick keeps mirroring while the mapped axis is overwritten.
+    (['RS:right'],                 [0.5, -0.25, 0, 0, 0, 0],  (0, 0, SIGNATURE_RT, 16384, 8192, 32767, 0)),
 ], ids=['A', 'face4', 'shoulders+sticks', 'dpad4', 'LS full right', 'LS full left', 'LS up',
-        'LS down', 'RS up-right (Y inverted)', 'RS down-right', 'combo A+dpad+LS+LT'])
+        'LS down', 'RS up-right (Y inverted)', 'RS down-right', 'combo A+dpad+LS+LT',
+        'token LS:up', 'token RS:left', 'token RS:right over mirrored LS'])
 def test_emitted_report_is_what_a_game_reads(pad, buttons, axes, expected):
     """One emitted frame must arrive bit-exact through XInputGetState - the API games use.
 

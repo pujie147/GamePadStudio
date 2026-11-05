@@ -149,6 +149,8 @@ ACTION_NAMES = {'none': '保留原始输入', 'capture': '保存截图', 'galler
                 'replay_record': '保存精彩瞬间 (回放录制)',
                 'record_toggle': '开始/停止录屏',
                 'gamepad_button': '映射为手柄按键',
+                'gamepad_axis': '映射为手柄摇杆方向',
+                'mouse_move': '模拟鼠标移动',
                 'gamepad_chord': '手柄多键组合宏',
                 'gamepad_turbo': '手柄高频连发 (Turbo)',
                 'gamepad_macro': '手柄连招序列宏'}
@@ -167,6 +169,8 @@ def get_action_names(lang=None):
                 'replay_record': 'Instant Replay (Save Clip)',
                 'record_toggle': 'Toggle Screen Recording',
                 'gamepad_button': 'Remap to Gamepad Button',
+                'gamepad_axis': 'Remap to Gamepad Stick Direction',
+                'mouse_move': 'Emulated Mouse Move',
                 'gamepad_chord': 'Gamepad Multi-button Macro',
                 'gamepad_turbo': 'Gamepad Turbo (Rapid Fire)',
                 'gamepad_macro': 'Gamepad Sequence Macro',

@@ -578,6 +578,11 @@ class Agent(QObject):
         elif action=='gamepad_turbo':
             self.actions.gamepad_turbo(binding.get('value', '0'), down, binding.get('rate_hz', 15))
             return
+        elif action=='gamepad_axis':
+            self.actions.gamepad_button(binding.get('value', 'LS:up'), down)
+            return
+        elif action=='mouse_move':
+            return
         if action=='hold':self.actions.hold(binding.get('value',''),down);return
         if not down or action=='none':return
         if action=='capture':self.capture()
