@@ -1,4 +1,4 @@
-#define AppVersion "2.2.0"
+#define AppVersion "2.3.0"
 [Setup]
 AppId={{A430C3D2-9278-48A9-BA24-15C59D0A0120}
 AppName=GamePad Studio

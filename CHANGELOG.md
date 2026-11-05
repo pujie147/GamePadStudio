@@ -4,6 +4,8 @@ All notable changes to **GamePad Studio** are documented in this file.
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-11-05
+
 ### 🕹 Stick-Direction Mapping (左右摇杆四向映射)
 - **Eight directions become first-class inputs (`studio.py` / `mapping_engine.py`)**: `LS:up/down/left/right` and `RS:*` had been legal triggers, labelled and axis-resolved for years, but were unreachable from the 按键映射 page — the input tile list was hardcoded to `[*range(64), 'LT', 'RT']` and the device refresh only ever added `LT`/`RT`. A direction saved through the dialog's source combo therefore became invisible *and* uneditable afterwards. The eight tiles are now built and shown according to the axes the device actually reports, so the 已配置 dot and the swap/clear affordances cover them like any button.
 - **Two new target actions (`mapping_engine.py`)**: `gamepad_axis` (value ∈ the eight direction tokens) and `mouse_move` (value ∈ four arrows). They are deliberately **not** added to `GAMEPAD_TARGETS`; that table gates macro steps and portable target buttons, so a direction cannot leak into a combo recording or be reinterpreted as a button. `validate_binding` accepts only the exact value sets and rejects `mode`, because 切换保持/连发 have no meaning for a stick axis.

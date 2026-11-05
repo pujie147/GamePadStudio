@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gamepadstudio"
-version = "2.2.0"
+version = "2.3.0"
 description = "Next-generation Game Controller Suite with 300Hz Virtual KBM, Physical Dynamics, Shutter Haptics, and HidHide Hardware Cloaking."
 readme = "README.md"
 requires-python = ">=3.10"
